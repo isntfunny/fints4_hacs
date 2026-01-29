@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "FinTS4",
+        "description": "Set up FinTS access to read balances and holdings.",
+        "data": {
+          "bank_identification_number": "Bank identification number (BLZ)",
+          "username": "Username",
+          "pin": "PIN",
+          "url": "Bank URL",
+          "name": "Name (optional)",
+          "product_id": "Product ID"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the bank with the provided details.",
+      "auth": "Authentication failed.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  }
+}
