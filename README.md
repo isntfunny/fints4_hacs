@@ -1,6 +1,7 @@
 # FinTS4 (Home Assistant Custom Integration)
 
 Read balances (and optional holdings) from German banks via FinTS.
+This is based on the original Home Assistant Integration but updated for FinTS 4 with Product Id support.
 
 ## Install (HACS)
 
