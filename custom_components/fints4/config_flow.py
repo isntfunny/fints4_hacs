@@ -247,36 +247,32 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             with self._pending_client.client:
-                if self._tan_request.decoupled and not self._tan_sent:
+                if self._tan_request.decoupled:
                     import time
-                    _LOGGER.info("Decoupled TAN - sending empty TAN and waiting 30s...")
-                    time.sleep(30)
-                    self._tan_sent = True
+                    if not self._tan_sent:
+                        _LOGGER.info("Decoupled TAN - waiting 30s and sending empty TAN...")
+                        time.sleep(30)
+                        self._tan_sent = True
 
-                if self._tan_sent:
-                    _LOGGER.info("TAN already sent, checking for accounts...")
-                    try:
-                        accounts = self._pending_client.client.get_sepa_accounts()
-                        _LOGGER.info("Got accounts: %s", accounts)
-                        if accounts:
-                            _LOGGER.info("TAN confirmed successfully!")
-                            return True
-                    except Exception as e:
-                        _LOGGER.info("Error getting accounts: %s", e)
+                    _LOGGER.info("Sending empty TAN for decoupled...")
+                    self._pending_client.client.send_tan(self._tan_request, "")
+                else:
+                    self._pending_client.client.send_tan(self._tan_request, "")
 
-                response = self._pending_client.client.send_tan(
-                    self._tan_request, ""
-                )
-                _LOGGER.info("Response: %s (type: %s)", response, type(response).__name__)
-
-                if isinstance(response, NeedTANResponse):
-                    _LOGGER.info("TAN still needed: %s", response)
-                    self._tan_request = response
-                    self._dialog_data = self._pending_client.client.pause_dialog()
+                _LOGGER.info("Checking client.init_tan_response...")
+                if isinstance(self._pending_client.client.init_tan_response, NeedTANResponse):
+                    _LOGGER.info("TAN still needed: %s", self._pending_client.client.init_tan_response)
+                    self._tan_request = self._pending_client.client.init_tan_response
                     return False
 
-                _LOGGER.info("TAN confirmed successfully!")
-                return True
+                _LOGGER.info("TAN confirmed - getting accounts...")
+                accounts = self._pending_client.client.get_sepa_accounts()
+                if accounts:
+                    _LOGGER.info("Got %d accounts - success!", len(accounts))
+                    return True
+
+                _LOGGER.info("No accounts returned")
+                return False
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Error while sending pushTAN: %s", err)
             self._tan_error = True
