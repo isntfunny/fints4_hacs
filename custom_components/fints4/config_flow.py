@@ -8,6 +8,7 @@ from typing import Any
 
 from fints.client import NeedTANResponse
 from fints.exceptions import FinTSClientError
+from fints.utils import minimal_interactive_cli_bootstrap
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -86,6 +87,17 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             await self.hass.async_add_executor_job(
+                minimal_interactive_cli_bootstrap, client.client
+            )
+        except Exception as e:
+            _LOGGER.warning("Error during bootstrap: %s", e)
+
+        if hasattr(client.client, "init_tan_response") and isinstance(client.client.init_tan_response, NeedTANResponse):
+            await self._handle_tan_challenge(user_input, client, client.client.init_tan_response)
+            return await self.async_step_wait_for_tan()
+
+        try:
+            await self.hass.async_add_executor_job(
                 client.init_tan_mechanism
             )
             result = await self.hass.async_add_executor_job(
@@ -94,8 +106,15 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except FinTSClientError as err:
             _LOGGER.warning("FinTS validation failed: %s", err)
             errors["base"] = "cannot_connect"
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Unexpected error during FinTS validation")
+        except Exception as err:  # noqa: BLE001
+            err_str = str(err)
+            if "NeedTANResponse" in type(err).__name__ or "NeedTANResponse" in err_str:
+                _LOGGER.info("TAN required (from exception): %s", err)
+                tan_response = getattr(err, "response", None) or getattr(err, "tan_request", None)
+                if tan_response:
+                    await self._handle_tan_challenge(user_input, client, tan_response)
+                    return await self.async_step_wait_for_tan()
+            _LOGGER.exception("Unexpected error during FinTS validation: %s", err)
             errors["base"] = "unknown"
         else:
             if isinstance(result, NeedTANResponse):
