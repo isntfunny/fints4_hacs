@@ -194,6 +194,7 @@ class FinTsAccount(SensorEntity):
         """Initialize a FinTs balance account."""
         self._client = client
         self._account = account
+        self._balance = None
         self._attr_name = name
         self._attr_icon = ICON
         self._attr_extra_state_attributes = {
@@ -202,13 +203,28 @@ class FinTsAccount(SensorEntity):
         }
         if self._client.name:
             self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
+        self._update_account_attributes()
+
+    def _update_account_attributes(self) -> None:
+        """Update account attributes."""
+        self._attr_extra_state_attributes["account_number"] = getattr(self._account, "accountnumber", None)
+        self._attr_extra_state_attributes["iban"] = getattr(self._account, "iban", None)
+        self._attr_extra_state_attributes["bic"] = getattr(self._account, "bic", None)
+        self._attr_extra_state_attributes["subaccount_number"] = getattr(self._account, "subaccountnumber", None)
+        self._attr_extra_state_attributes["account_type"] = getattr(self._account, "type", None)
+        self._attr_extra_state_attributes["currency"] = getattr(self._account, "currency", None)
+        self._attr_extra_state_attributes["iban"] = getattr(self._account, "iban", None)
 
     def update(self) -> None:
         """Get the current balance and currency for the account."""
         bank = self._client.client
-        balance = bank.get_balance(self._account)
-        self._attr_native_value = balance.amount
-        self._attr_native_unit_of_measurement = balance.currency
+        self._balance = bank.get_balance(self._account)
+        if self._balance:
+            self._attr_native_value = self._balance.amount
+            self._attr_native_unit_of_measurement = self._balance.currency
+            self._attr_extra_state_attributes["balance"] = str(self._balance.amount)
+            self._attr_extra_state_attributes["balance_currency"] = self._balance.currency
+            self._attr_extra_state_attributes["balance_date"] = str(self._balance.date) if self._balance.date else None
         _LOGGER.debug("updated balance of account %s", self.name)
 
 
@@ -227,6 +243,15 @@ class FinTsHoldingsAccount(SensorEntity):
         self._holdings: list[Any] = []
         self._attr_icon = ICON
         self._attr_native_unit_of_measurement = "EUR"
+        self._attr_extra_state_attributes = {
+            ATTR_ACCOUNT: getattr(account, "accountnumber", None),
+            ATTR_ACCOUNT_TYPE: "holdings",
+        }
+        if self._client.name:
+            self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
+        self._attr_extra_state_attributes["account_number"] = getattr(account, "accountnumber", None)
+        self._attr_extra_state_attributes["iban"] = getattr(account, "iban", None)
+        self._attr_extra_state_attributes["bic"] = getattr(account, "bic", None)
 
     def update(self) -> None:
         """Get the current holdings for the account."""
