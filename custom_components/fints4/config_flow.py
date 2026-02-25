@@ -86,6 +86,13 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {},
         )
 
+        client = FinTsClient(
+            credentials,
+            user_input.get(CONF_NAME) or user_input[CONF_BIN],
+            {},
+            {},
+        )
+
         try:
             await self.hass.async_add_executor_job(
                 minimal_interactive_cli_bootstrap, client.client
@@ -94,15 +101,20 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception as e:
             _LOGGER.warning("Error during bootstrap: %s", e)
 
-        def get_accounts():
+        self._pending_client = client
+
+        def try_get_accounts():
             with client.client:
-                accounts = client.client.get_sepa_accounts()
-                system_id = getattr(client.client, "system_id", None)
-                return accounts, system_id
+                return client.client.get_sepa_accounts()
 
         try:
-            result = await self.hass.async_add_executor_job(get_accounts)
+            accounts = await self.hass.async_add_executor_job(try_get_accounts)
         except Exception as err:  # noqa: BLE001
+            err_str = str(err)
+            if "NeedTANResponse" in type(err).__name__ or "NeedTANResponse" in err_str:
+                _LOGGER.info("TAN required, showing confirm button")
+                return await self.async_step_confirm_tan()
+
             _LOGGER.exception("Error connecting to bank: %s", err)
             errors["base"] = "cannot_connect"
             self._user_input = user_input
@@ -112,8 +124,8 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors=errors,
             )
 
-        accounts, system_id = result
         if accounts:
+            system_id = getattr(client.client, "system_id", None)
             await self.async_set_unique_id(
                 f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
             )
@@ -133,6 +145,59 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=_build_user_data_schema(user_input),
             errors=errors,
         )
+
+    async def async_step_confirm_tan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Show a button to confirm after TAN is accepted."""
+        if user_input is not None:
+            return await self.async_step_tan_confirmed()
+
+        return self.async_show_form(
+            step_id="confirm_tan",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "message": "Bitte bestätige die pushTAN auf deinem Smartphone und klicke dann auf 'Weiter'."
+            },
+        )
+
+    async def async_step_tan_confirmed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Try to get accounts after user confirmed TAN."""
+        if not self._pending_client:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_build_user_data_schema(self._user_input),
+                errors={"base": "unknown"},
+            )
+
+        def try_get_accounts():
+            with self._pending_client.client:
+                return self._pending_client.client.get_sepa_accounts()
+
+        try:
+            accounts = await self.hass.async_add_executor_job(try_get_accounts)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Error after TAN confirm: %s", err)
+            return await self.async_step_confirm_tan()
+
+        if accounts:
+            system_id = getattr(self._pending_client.client, "system_id", None)
+            assert self._user_input is not None
+            await self.async_set_unique_id(
+                f"{self._user_input[CONF_BIN]}-{self._user_input[CONF_USERNAME]}"
+            )
+            self._abort_if_unique_id_configured()
+            entry_data = {**self._user_input}
+            if system_id:
+                entry_data["system_id"] = system_id
+            return self.async_create_entry(
+                title=self._user_input.get(CONF_NAME) or self._user_input[CONF_BIN],
+                data=entry_data,
+            )
+
+        return await self.async_step_confirm_tan()
 
     async def _handle_tan_challenge(
         self,
