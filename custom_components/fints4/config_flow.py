@@ -94,80 +94,40 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception as e:
             _LOGGER.warning("Error during bootstrap: %s", e)
 
-        tan_needed = False
-        tan_challenge = None
-
-        def check_tan_and_get_accounts():
-            nonlocal tan_needed, tan_challenge
-            _LOGGER.info("Opening dialog with client")
+        def get_accounts():
             with client.client:
-                _LOGGER.info("Inside dialog, checking init_tan_response: %s", getattr(client.client, "init_tan_response", None))
-                if hasattr(client.client, "init_tan_response") and isinstance(client.client.init_tan_response, NeedTANResponse):
-                    tan_needed = True
-                    tan_challenge = client.client.init_tan_response
-                    _LOGGER.info("TAN needed detected: %s", tan_challenge)
-                    dialog_data = client.client.pause_dialog()
-                    _LOGGER.info("Dialog paused, returning dialog_data")
-                    return ("tan", dialog_data)
-                _LOGGER.info("Getting accounts...")
-                return ("accounts", client.client.get_sepa_accounts())
+                accounts = client.client.get_sepa_accounts()
+                system_id = getattr(client.client, "system_id", None)
+                return accounts, system_id
 
         try:
-            result = await self.hass.async_add_executor_job(check_tan_and_get_accounts)
-            _LOGGER.info("Result from check_tan_and_get_accounts: %s, tan_needed: %s", result, tan_needed)
+            result = await self.hass.async_add_executor_job(get_accounts)
         except Exception as err:  # noqa: BLE001
-            err_type = type(err).__name__
-            err_str = str(err)
-            _LOGGER.exception("Exception during FinTS: type=%s, msg=%s", err_type, err_str)
-            if "NeedTANResponse" in err_type or "NeedTANResponse" in err_str:
-                _LOGGER.info("TAN required (from exception): %s", err)
-                tan_response = getattr(err, "response", None) or getattr(err, "tan_request", None)
-                if tan_response:
-                    def pause_and_handle():
-                        with client.client:
-                            return client.client.pause_dialog()
-                    try:
-                        dialog_data = await self.hass.async_add_executor_job(pause_and_handle)
-                    except Exception as pd_err:
-                        _LOGGER.warning("Could not pause dialog: %s", pd_err)
-                        dialog_data = None
-                    await self._handle_tan_challenge(user_input, client, tan_response, dialog_data)
-                    return await self.async_step_wait_for_tan()
-            errors["base"] = "unknown"
-        else:
-            if tan_needed and tan_challenge:
-                dialog_data = result[1] if isinstance(result, tuple) else None
-                await self._handle_tan_challenge(user_input, client, tan_challenge, dialog_data)
-                return await self.async_step_wait_for_tan()
-
-            if isinstance(result, tuple) and result[0] == "accounts":
-                accounts = result[1]
-                if isinstance(accounts, NeedTANResponse):
-                    def pause_for_accounts():
-                        with client.client:
-                            return client.client.pause_dialog()
-                    try:
-                        dialog_data = await self.hass.async_add_executor_job(pause_for_accounts)
-                    except Exception as pd_err:
-                        _LOGGER.warning("Could not pause dialog for accounts: %s", pd_err)
-                        dialog_data = None
-                    await self._handle_tan_challenge(user_input, client, accounts, dialog_data)
-                    return await self.async_step_wait_for_tan()
-
-                if accounts:
-                    await self.async_set_unique_id(
-                        f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
-                    )
-                    self._abort_if_unique_id_configured()
-                    return self.async_create_entry(
-                        title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
-                        data=user_input,
-                    )
-
+            _LOGGER.exception("Error connecting to bank: %s", err)
             errors["base"] = "cannot_connect"
-
-        if errors:
             self._user_input = user_input
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_build_user_data_schema(user_input),
+                errors=errors,
+            )
+
+        accounts, system_id = result
+        if accounts:
+            await self.async_set_unique_id(
+                f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
+            )
+            self._abort_if_unique_id_configured()
+            entry_data = {**user_input}
+            if system_id:
+                entry_data["system_id"] = system_id
+            return self.async_create_entry(
+                title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
+                data=entry_data,
+            )
+
+        errors["base"] = "cannot_connect"
+        self._user_input = user_input
         return self.async_show_form(
             step_id="user",
             data_schema=_build_user_data_schema(user_input),
