@@ -29,6 +29,7 @@ from .const import (
     CONF_BIN,
     CONF_HOLDINGS,
     CONF_PRODUCT_ID,
+    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -205,6 +206,15 @@ class FinTsAccount(SensorEntity):
             self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
         self._update_account_attributes()
 
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._client.name)},
+            "name": f"FinTS - {self._client.name}",
+            "manufacturer": "FinTS",
+            "model": "Bank Account",
+        }
+
     def _update_account_attributes(self) -> None:
         """Update account attributes."""
         self._attr_extra_state_attributes["account_number"] = getattr(self._account, "accountnumber", None)
@@ -250,6 +260,15 @@ class FinTsHoldingsAccount(SensorEntity):
         self._attr_extra_state_attributes["account_number"] = getattr(account, "accountnumber", None)
         self._attr_extra_state_attributes["iban"] = getattr(account, "iban", None)
         self._attr_extra_state_attributes["bic"] = getattr(account, "bic", None)
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._client.name)},
+            "name": f"FinTS - {self._client.name}",
+            "manufacturer": "FinTS",
+            "model": "Bank Account",
+        }
 
     def update(self) -> None:
         """Get the current holdings for the account."""
