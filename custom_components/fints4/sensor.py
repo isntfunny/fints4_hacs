@@ -222,8 +222,6 @@ class FinTsAccount(SensorEntity):
         if self._balance:
             self._attr_native_value = self._balance.amount
             self._attr_native_unit_of_measurement = self._balance.currency
-            self._attr_extra_state_attributes["balance"] = str(self._balance.amount)
-            self._attr_extra_state_attributes["balance_currency"] = self._balance.currency
             self._attr_extra_state_attributes["balance_date"] = str(self._balance.date) if self._balance.date else None
         _LOGGER.debug("updated balance of account %s", self.name)
 
