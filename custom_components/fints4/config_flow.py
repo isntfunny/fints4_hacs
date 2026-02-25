@@ -56,6 +56,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     _user_input: dict[str, Any] | None = None
     _tan_task: asyncio.Task | None = None
     _tan_error: bool = False
+    _tan_sent: bool = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -190,6 +191,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._user_input = user_input
         self._tan_task = None
         self._tan_error = False
+        self._tan_sent = False
 
     async def async_step_wait_for_tan(
         self, user_input: dict[str, Any] | None = None
@@ -245,10 +247,22 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             with self._pending_client.client:
-                if self._tan_request.decoupled:
+                if self._tan_request.decoupled and not self._tan_sent:
                     import time
-                    _LOGGER.info("Decoupled TAN - waiting 30s before checking...")
+                    _LOGGER.info("Decoupled TAN - sending empty TAN and waiting 30s...")
                     time.sleep(30)
+                    self._tan_sent = True
+
+                if self._tan_sent:
+                    _LOGGER.info("TAN already sent, checking for accounts...")
+                    try:
+                        accounts = self._pending_client.client.get_sepa_accounts()
+                        _LOGGER.info("Got accounts: %s", accounts)
+                        if accounts:
+                            _LOGGER.info("TAN confirmed successfully!")
+                            return True
+                    except Exception as e:
+                        _LOGGER.info("Error getting accounts: %s", e)
 
                 response = self._pending_client.client.send_tan(
                     self._tan_request, ""
