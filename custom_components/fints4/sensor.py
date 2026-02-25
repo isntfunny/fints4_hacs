@@ -77,6 +77,7 @@ def setup_platform(
         config[CONF_PIN],
         config[CONF_URL],
         config.get(CONF_PRODUCT_ID),
+        None,
     )
     fints_name = cast(str, config.get(CONF_NAME, config[CONF_BIN]))
 
@@ -145,12 +146,14 @@ async def async_setup_entry(
     """Set up FinTS from a config entry."""
 
     data = entry.data
+    system_id = entry.data.get("system_id")
     credentials = BankCredentials(
         data[CONF_BIN],
         data[CONF_USERNAME],
         data[CONF_PIN],
         data[CONF_URL],
         data.get(CONF_PRODUCT_ID),
+        system_id,
     )
     fints_name = data.get(CONF_NAME, data[CONF_BIN])
     account_config = {
@@ -166,6 +169,13 @@ async def async_setup_entry(
     balance_accounts, holdings_accounts = await hass.async_add_executor_job(
         client.detect_accounts
     )
+
+    new_system_id = client.system_id
+    if new_system_id and new_system_id != system_id:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, "system_id": new_system_id},
+        )
     accounts = _create_entities(
         client, fints_name, account_config, holdings_config, balance_accounts, holdings_accounts
     )
@@ -197,8 +207,8 @@ class FinTsAccount(SensorEntity):
         """Get the current balance and currency for the account."""
         bank = self._client.client
         balance = bank.get_balance(self._account)
-        self._attr_native_value = balance.amount.amount
-        self._attr_native_unit_of_measurement = balance.amount.currency
+        self._attr_native_value = balance.amount
+        self._attr_native_unit_of_measurement = balance.currency
         _LOGGER.debug("updated balance of account %s", self.name)
 
 

@@ -11,7 +11,7 @@ from fints.models import SEPAAccount
 
 _LOGGER = logging.getLogger(__name__)
 
-BankCredentials = namedtuple("BankCredentials", "blz login pin url product_id")  # noqa: PYI024
+BankCredentials = namedtuple("BankCredentials", "blz login pin url product_id system_id")  # noqa: PYI024
 
 
 class FinTsClient:
@@ -20,6 +20,8 @@ class FinTsClient:
     The FinTS library persists the current dialog with the bank and stores bank
     capabilities. So caching the client is beneficial.
     """
+
+    PUSHTAN_CODE = "921"
 
     def __init__(
         self,
@@ -46,8 +48,42 @@ class FinTsClient:
                 self._credentials.pin,
                 self._credentials.url,
                 product_id=self._credentials.product_id,
+                system_id=self._credentials.system_id,
             )
         return self._client
+
+    def init_tan_mechanism(self) -> None:
+        """Initialize TAN mechanism (pushTAN if available)."""
+        if not self._client:
+            return
+        try:
+            with self._client:
+                mechanisms = self._client.get_tan_mechanisms()
+                if not mechanisms:
+                    _LOGGER.warning("No TAN mechanisms available")
+                    return
+
+                if self.PUSHTAN_CODE in mechanisms:
+                    _LOGGER.info("Using pushTAN (%s)", self.PUSHTAN_CODE)
+                    self._client.set_tan_mechanism(self.PUSHTAN_CODE)
+                    if mechanisms[self.PUSHTAN_CODE].description_required:
+                        try:
+                            media = self._client.get_tan_media()
+                            if media and len(media) > 1 and media[1]:
+                                self._client.set_tan_medium(media[1][0])
+                        except Exception as e:
+                            _LOGGER.warning("Could not set TAN medium: %s", e)
+                else:
+                    _LOGGER.warning("pushTAN (921) not available, available: %s", list(mechanisms.keys()))
+        except Exception as e:
+            _LOGGER.warning("Could not initialize TAN mechanism: %s", e)
+
+    @property
+    def system_id(self) -> str | None:
+        """Get the system ID from the client."""
+        if self._client:
+            return getattr(self._client, "system_id", None)
+        return None
 
     def get_account_information(self, iban: str) -> dict[str, Any] | None:
         """Get account information for an IBAN, if available."""

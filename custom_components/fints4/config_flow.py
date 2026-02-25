@@ -74,6 +74,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_input[CONF_PIN],
             user_input[CONF_URL],
             user_input.get(CONF_PRODUCT_ID),
+            None,
         )
 
         client = FinTsClient(
@@ -84,6 +85,9 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         try:
+            await self.hass.async_add_executor_job(
+                client.init_tan_mechanism
+            )
             result = await self.hass.async_add_executor_job(
                 client.client.get_sepa_accounts
             )
@@ -157,7 +161,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Background task that polls for the pushTAN completion."""
 
         for _ in range(30):
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
             success = await self.hass.async_add_executor_job(self._send_pending_tan)
             if success:
                 await self.hass.config_entries.flow.async_configure(
@@ -182,9 +186,17 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             with self._pending_client.client.resume_dialog(self._dialog_data):
-                response = self._pending_client.client.send_tan(
-                    self._tan_request, ""
-                )
+                if self._tan_request.decoupled:
+                    import time
+                    _LOGGER.info("Waiting for pushTAN confirmation (decoupled)...")
+                    time.sleep(30)
+                    response = self._pending_client.client.send_tan(
+                        self._tan_request, ""
+                    )
+                else:
+                    response = self._pending_client.client.send_tan(
+                        self._tan_request, ""
+                    )
                 if isinstance(response, NeedTANResponse):
                     self._tan_request = response
                     self._dialog_data = self._pending_client.client.pause_dialog()
@@ -206,7 +218,17 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             f"{self._user_input[CONF_BIN]}-{self._user_input[CONF_USERNAME]}"
         )
         self._abort_if_unique_id_configured()
+
+        system_id = None
+        if self._pending_client:
+            system_id = getattr(self._pending_client.client, "system_id", None)
+
+        entry_data = {**self._user_input}
+        if system_id:
+            entry_data["system_id"] = system_id
+            _LOGGER.info("Saving system_id: %s", system_id)
+
         return self.async_create_entry(
             title=self._user_input.get(CONF_NAME) or self._user_input[CONF_BIN],
-            data=self._user_input,
+            data=entry_data,
         )
