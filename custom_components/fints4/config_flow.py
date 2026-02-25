@@ -219,7 +219,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _wait_for_tan(self) -> None:
         """Background task that polls for the pushTAN completion."""
 
-        for _ in range(30):
+        for _ in range(12):
             await asyncio.sleep(10)
             success = await self.hass.async_add_executor_job(self._send_pending_tan)
             if success:
