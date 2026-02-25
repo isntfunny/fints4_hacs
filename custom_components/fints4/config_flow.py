@@ -239,13 +239,12 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if (
             not self._pending_client
             or not self._tan_request
-            or not self._dialog_data
         ):
-            _LOGGER.info("Missing client, tan_request, or dialog_data")
+            _LOGGER.info("Missing client or tan_request")
             return False
 
         try:
-            with self._pending_client.client.resume_dialog(self._dialog_data):
+            with self._pending_client.client:
                 response = self._pending_client.client.send_tan(
                     self._tan_request, ""
                 )
