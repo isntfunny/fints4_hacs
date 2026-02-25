@@ -241,25 +241,24 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             or not self._tan_request
             or not self._dialog_data
         ):
+            _LOGGER.info("Missing client, tan_request, or dialog_data")
             return False
 
         try:
             with self._pending_client.client.resume_dialog(self._dialog_data):
-                if self._tan_request.decoupled:
-                    import time
-                    _LOGGER.info("Waiting for pushTAN confirmation (decoupled)...")
-                    time.sleep(30)
-                    response = self._pending_client.client.send_tan(
-                        self._tan_request, ""
-                    )
-                else:
-                    response = self._pending_client.client.send_tan(
-                        self._tan_request, ""
-                    )
+                response = self._pending_client.client.send_tan(
+                    self._tan_request, ""
+                )
+                _LOGGER.info("Response: %s (type: %s)", response, type(response).__name__)
+
                 if isinstance(response, NeedTANResponse):
+                    _LOGGER.info("TAN still needed: %s", response)
                     self._tan_request = response
                     self._dialog_data = self._pending_client.client.pause_dialog()
                     return False
+
+                _LOGGER.info("TAN confirmed successfully!")
+                return True
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Error while sending pushTAN: %s", err)
             self._tan_error = True
