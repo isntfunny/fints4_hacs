@@ -142,7 +142,15 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if isinstance(result, tuple) and result[0] == "accounts":
                 accounts = result[1]
                 if isinstance(accounts, NeedTANResponse):
-                    await self._handle_tan_challenge(user_input, client, accounts)
+                    def pause_for_accounts():
+                        with client.client:
+                            return client.client.pause_dialog()
+                    try:
+                        dialog_data = await self.hass.async_add_executor_job(pause_for_accounts)
+                    except Exception as pd_err:
+                        _LOGGER.warning("Could not pause dialog for accounts: %s", pd_err)
+                        dialog_data = None
+                    await self._handle_tan_challenge(user_input, client, accounts, dialog_data)
                     return await self.async_step_wait_for_tan()
 
                 if accounts:
