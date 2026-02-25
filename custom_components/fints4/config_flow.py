@@ -105,9 +105,11 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     tan_needed = True
                     tan_challenge = client.client.init_tan_response
                     _LOGGER.info("TAN needed detected: %s", tan_challenge)
-                    return None
+                    dialog_data = client.client.pause_dialog()
+                    _LOGGER.info("Dialog paused, returning dialog_data")
+                    return ("tan", dialog_data)
                 _LOGGER.info("Getting accounts...")
-                return client.client.get_sepa_accounts()
+                return ("accounts", client.client.get_sepa_accounts())
 
         try:
             result = await self.hass.async_add_executor_job(check_tan_and_get_accounts)
@@ -120,27 +122,38 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.info("TAN required (from exception): %s", err)
                 tan_response = getattr(err, "response", None) or getattr(err, "tan_request", None)
                 if tan_response:
-                    await self._handle_tan_challenge(user_input, client, tan_response)
+                    def pause_and_handle():
+                        with client.client:
+                            return client.client.pause_dialog()
+                    try:
+                        dialog_data = await self.hass.async_add_executor_job(pause_and_handle)
+                    except Exception as pd_err:
+                        _LOGGER.warning("Could not pause dialog: %s", pd_err)
+                        dialog_data = None
+                    await self._handle_tan_challenge(user_input, client, tan_response, dialog_data)
                     return await self.async_step_wait_for_tan()
             errors["base"] = "unknown"
         else:
             if tan_needed and tan_challenge:
+                self._dialog_data = result[1] if isinstance(result, tuple) else None
                 await self._handle_tan_challenge(user_input, client, tan_challenge)
                 return await self.async_step_wait_for_tan()
 
-            if isinstance(result, NeedTANResponse):
-                await self._handle_tan_challenge(user_input, client, result)
-                return await self.async_step_wait_for_tan()
+            if isinstance(result, tuple) and result[0] == "accounts":
+                accounts = result[1]
+                if isinstance(accounts, NeedTANResponse):
+                    await self._handle_tan_challenge(user_input, client, accounts)
+                    return await self.async_step_wait_for_tan()
 
-            if result:
-                await self.async_set_unique_id(
-                    f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
-                )
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
-                    data=user_input,
-                )
+                if accounts:
+                    await self.async_set_unique_id(
+                        f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
+                        data=user_input,
+                    )
 
             errors["base"] = "cannot_connect"
 
@@ -157,11 +170,15 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         user_input: dict[str, Any],
         client: FinTsClient,
         challenge: NeedTANResponse,
+        dialog_data: Any = None,
     ) -> None:
         """Store state so we can finish after pushTAN."""
         self._pending_client = client
         self._tan_request = challenge
-        self._dialog_data = client.client.pause_dialog()
+        if dialog_data is not None:
+            self._dialog_data = dialog_data
+        else:
+            self._dialog_data = client.client.pause_dialog()
         self._user_input = user_input
         self._tan_task = None
         self._tan_error = False
