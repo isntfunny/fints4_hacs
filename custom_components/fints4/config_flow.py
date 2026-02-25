@@ -89,6 +89,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.hass.async_add_executor_job(
                 minimal_interactive_cli_bootstrap, client.client
             )
+            _LOGGER.info("Bootstrap completed")
         except Exception as e:
             _LOGGER.warning("Error during bootstrap: %s", e)
 
@@ -97,19 +98,25 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         def check_tan_and_get_accounts():
             nonlocal tan_needed, tan_challenge
+            _LOGGER.info("Opening dialog with client")
             with client.client:
+                _LOGGER.info("Inside dialog, checking init_tan_response: %s", getattr(client.client, "init_tan_response", None))
                 if hasattr(client.client, "init_tan_response") and isinstance(client.client.init_tan_response, NeedTANResponse):
                     tan_needed = True
                     tan_challenge = client.client.init_tan_response
+                    _LOGGER.info("TAN needed detected: %s", tan_challenge)
                     return None
+                _LOGGER.info("Getting accounts...")
                 return client.client.get_sepa_accounts()
 
         try:
             result = await self.hass.async_add_executor_job(check_tan_and_get_accounts)
+            _LOGGER.info("Result from check_tan_and_get_accounts: %s, tan_needed: %s", result, tan_needed)
         except Exception as err:  # noqa: BLE001
+            err_type = type(err).__name__
             err_str = str(err)
-            _LOGGER.exception("Error during FinTS: %s", err)
-            if "NeedTANResponse" in type(err).__name__ or "NeedTANResponse" in err_str:
+            _LOGGER.exception("Exception during FinTS: type=%s, msg=%s", err_type, err_str)
+            if "NeedTANResponse" in err_type or "NeedTANResponse" in err_str:
                 _LOGGER.info("TAN required (from exception): %s", err)
                 tan_response = getattr(err, "response", None) or getattr(err, "tan_request", None)
                 if tan_response:
