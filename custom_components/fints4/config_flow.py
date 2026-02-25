@@ -135,8 +135,8 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "unknown"
         else:
             if tan_needed and tan_challenge:
-                self._dialog_data = result[1] if isinstance(result, tuple) else None
-                await self._handle_tan_challenge(user_input, client, tan_challenge)
+                dialog_data = result[1] if isinstance(result, tuple) else None
+                await self._handle_tan_challenge(user_input, client, tan_challenge, dialog_data)
                 return await self.async_step_wait_for_tan()
 
             if isinstance(result, tuple) and result[0] == "accounts":
