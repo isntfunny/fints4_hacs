@@ -213,6 +213,7 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="wait_for_tan",
             progress_action="wait_for_tan",
             description_placeholders={"description": description},
+            progress_task=self._tan_task,
         )
 
     async def _wait_for_tan(self) -> None:
