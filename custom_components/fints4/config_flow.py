@@ -92,43 +92,50 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception as e:
             _LOGGER.warning("Error during bootstrap: %s", e)
 
-        if hasattr(client.client, "init_tan_response") and isinstance(client.client.init_tan_response, NeedTANResponse):
-            await self._handle_tan_challenge(user_input, client, client.client.init_tan_response)
-            return await self.async_step_wait_for_tan()
+        tan_needed = False
+        tan_challenge = None
+
+        def check_tan_and_get_accounts():
+            nonlocal tan_needed, tan_challenge
+            with client.client:
+                if hasattr(client.client, "init_tan_response") and isinstance(client.client.init_tan_response, NeedTANResponse):
+                    tan_needed = True
+                    tan_challenge = client.client.init_tan_response
+                    return None
+                return client.client.get_sepa_accounts()
 
         try:
-            await self.hass.async_add_executor_job(
-                client.init_tan_mechanism
-            )
-            result = await self.hass.async_add_executor_job(
-                client.client.get_sepa_accounts
-            )
-        except FinTSClientError as err:
-            _LOGGER.warning("FinTS validation failed: %s", err)
-            errors["base"] = "cannot_connect"
+            result = await self.hass.async_add_executor_job(check_tan_and_get_accounts)
         except Exception as err:  # noqa: BLE001
             err_str = str(err)
+            _LOGGER.exception("Error during FinTS: %s", err)
             if "NeedTANResponse" in type(err).__name__ or "NeedTANResponse" in err_str:
                 _LOGGER.info("TAN required (from exception): %s", err)
                 tan_response = getattr(err, "response", None) or getattr(err, "tan_request", None)
                 if tan_response:
                     await self._handle_tan_challenge(user_input, client, tan_response)
                     return await self.async_step_wait_for_tan()
-            _LOGGER.exception("Unexpected error during FinTS validation: %s", err)
             errors["base"] = "unknown"
         else:
+            if tan_needed and tan_challenge:
+                await self._handle_tan_challenge(user_input, client, tan_challenge)
+                return await self.async_step_wait_for_tan()
+
             if isinstance(result, NeedTANResponse):
                 await self._handle_tan_challenge(user_input, client, result)
                 return await self.async_step_wait_for_tan()
 
-            await self.async_set_unique_id(
-                f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
-            )
-            self._abort_if_unique_id_configured()
-            return self.async_create_entry(
-                title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
-                data=user_input,
-            )
+            if result:
+                await self.async_set_unique_id(
+                    f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
+                    data=user_input,
+                )
+
+            errors["base"] = "cannot_connect"
 
         if errors:
             self._user_input = user_input
