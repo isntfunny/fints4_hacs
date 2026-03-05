@@ -13,6 +13,55 @@ _LOGGER = logging.getLogger(__name__)
 
 BankCredentials = namedtuple("BankCredentials", "blz login pin url product_id system_id")  # noqa: PYI024
 
+PREFERRED_TAN_CODE = "921"  # pushTAN (decoupled)
+
+
+def auto_bootstrap(client: FinTS3PinTanClient, preferred_tan_code: str = PREFERRED_TAN_CODE) -> None:
+    """Non-interactively configure TAN mechanism on a fresh client.
+
+    Must be called after FinTS3PinTanClient() and before opening a dialog
+    (``with client:``).  The FinTS library fetches BPD during __init__, so
+    mechanism data is already available without an extra dialog.
+
+    Selects pushTAN (921) if available, otherwise the first non-999 method.
+    """
+    if client.get_current_tan_mechanism():
+        return  # Already set (e.g. restored from system_id session state)
+
+    client.fetch_tan_mechanisms()
+    mechanisms = client.get_tan_mechanisms()
+    if not mechanisms:
+        _LOGGER.warning("Bank returned no TAN mechanisms")
+        return
+
+    if preferred_tan_code in mechanisms:
+        selected = preferred_tan_code
+    else:
+        selected = next(
+            (k for k in mechanisms if k != "999"),
+            list(mechanisms.keys())[0],
+        )
+
+    _LOGGER.info(
+        "Auto-selecting TAN mechanism: %s (%s)", selected, mechanisms[selected].name
+    )
+    client.set_tan_mechanism(selected)
+
+    # Some banks require choosing a TAN medium (which phone gets the pushTAN).
+    if client.selected_tan_medium is None and client.is_tan_media_required():
+        try:
+            media_result = client.get_tan_media()
+            media_list = media_result[1] if len(media_result) > 1 else []
+            if media_list:
+                client.set_tan_medium(media_list[0])
+                _LOGGER.info("Auto-selected TAN medium: %s", media_list[0])
+            else:
+                # Workaround: banks (e.g. Sparkasse) that return HKTAM required
+                # but accept an empty medium string.
+                client.selected_tan_medium = ""
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Could not fetch TAN media (continuing anyway): %s", exc)
+
 
 class FinTsClient:
     """Wrapper around the FinTS3PinTanClient.
@@ -38,7 +87,12 @@ class FinTsClient:
 
     @property
     def client(self) -> FinTS3PinTanClient:
-        """Get (and cache) the FinTS client object."""
+        """Get (and cache) the FinTS client object.
+
+        auto_bootstrap() is called once after creation so the correct TAN
+        mechanism (pushTAN 921) is selected before any dialog is opened.
+        Without this the bank rejects the dialog with an auth error.
+        """
         if self._client is None:
             self._client = FinTS3PinTanClient(
                 self._credentials.blz,
@@ -48,6 +102,7 @@ class FinTsClient:
                 product_id=self._credentials.product_id,
                 system_id=self._credentials.system_id,
             )
+            auto_bootstrap(self._client)
         return self._client
 
     @property

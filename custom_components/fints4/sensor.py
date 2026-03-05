@@ -16,7 +16,6 @@ from homeassistant.components.sensor import (
 from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -68,11 +67,7 @@ def setup_platform(
     add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up the sensors.
-
-    Login to the bank and get a list of existing accounts. Create a
-    sensor for each account.
-    """
+    """Set up the sensors from YAML (legacy path, not used for config entries)."""
     credentials = BankCredentials(
         config[CONF_BIN],
         config[CONF_USERNAME],
@@ -86,7 +81,6 @@ def setup_platform(
     account_config = {
         acc[CONF_ACCOUNT]: acc.get(CONF_NAME) for acc in config[CONF_ACCOUNTS]
     }
-
     holdings_config = {
         acc[CONF_ACCOUNT]: acc.get(CONF_NAME) for acc in config[CONF_HOLDINGS]
     }
@@ -96,7 +90,6 @@ def setup_platform(
     accounts = _create_entities(
         client, fints_name, account_config, holdings_config, balance_accounts, holdings_accounts
     )
-
     add_entities(accounts, True)
 
 
@@ -147,61 +140,21 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up FinTS from a config entry.
+    """Set up FinTS sensors from a config entry.
 
-    If authentication fails (e.g. system_id expired after ~60 days or PIN
-    changed), ConfigEntryAuthFailed is raised.  HA will then show a
-    notification prompting the user to re-authenticate via the integration
-    page – which runs async_step_reauth / async_step_reauth_confirm.
+    The bank connection and account discovery are done in __init__.async_setup_entry
+    before this is called, so we only need to create the entities from the
+    already-fetched data stored in hass.data.
     """
-
-    data = entry.data
-    system_id = entry.data.get("system_id")
-    credentials = BankCredentials(
-        data[CONF_BIN],
-        data[CONF_USERNAME],
-        data[CONF_PIN],
-        data[CONF_URL],
-        data.get(CONF_PRODUCT_ID),
-        system_id,
-    )
-    fints_name = data.get(CONF_NAME, data[CONF_BIN])
-    account_config = {
-        acc[CONF_ACCOUNT]: acc.get(CONF_NAME)
-        for acc in data.get(CONF_ACCOUNTS, [])
-    }
-    holdings_config = {
-        acc[CONF_ACCOUNT]: acc.get(CONF_NAME)
-        for acc in data.get(CONF_HOLDINGS, [])
-    }
-
-    client = FinTsClient(credentials, fints_name, account_config, holdings_config)
-
-    try:
-        balance_accounts, holdings_accounts = await hass.async_add_executor_job(
-            client.detect_accounts
-        )
-    except Exception as err:  # noqa: BLE001
-        err_str = str(err)
-        _LOGGER.error("FinTS connection failed for %s: %s", fints_name, err_str)
-        # Treat as an authentication error so HA triggers the re-auth flow.
-        # This covers expired system_id (60-day pushTAN renewal), wrong PIN,
-        # and similar credential issues.  Transient network errors will also
-        # land here, causing the re-auth prompt, but the user can dismiss it
-        # and the next scheduled update will retry.
-        raise ConfigEntryAuthFailed(err_str) from err
-
-    # Persist a refreshed system_id when the bank issues a new one
-    new_system_id = client.system_id
-    if new_system_id and new_system_id != system_id:
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**entry.data, "system_id": new_system_id},
-        )
+    entry_data = hass.data[DOMAIN][entry.entry_id]
 
     accounts = _create_entities(
-        client, fints_name, account_config, holdings_config,
-        balance_accounts, holdings_accounts,
+        entry_data["client"],
+        entry_data["fints_name"],
+        entry_data["account_config"],
+        entry_data["holdings_config"],
+        entry_data["balance_accounts"],
+        entry_data["holdings_accounts"],
         config_entry=entry,
     )
 
@@ -209,11 +162,7 @@ async def async_setup_entry(
 
 
 class FinTsAccount(SensorEntity):
-    """Sensor for a FinTS balance account.
-
-    A balance account contains an amount of money (=balance). The amount may
-    also be negative.
-    """
+    """Sensor for a FinTS balance account."""
 
     def __init__(
         self,
@@ -222,7 +171,6 @@ class FinTsAccount(SensorEntity):
         name: str,
         config_entry: ConfigEntry | None = None,
     ) -> None:
-        """Initialize a FinTs balance account."""
         self._client = client
         self._account = account
         self._balance = None
@@ -247,7 +195,6 @@ class FinTsAccount(SensorEntity):
         }
 
     def _update_account_attributes(self) -> None:
-        """Update account attributes."""
         self._attr_extra_state_attributes["account_number"] = getattr(self._account, "accountnumber", None)
         self._attr_extra_state_attributes["iban"] = getattr(self._account, "iban", None)
         self._attr_extra_state_attributes["bic"] = getattr(self._account, "bic", None)
@@ -267,7 +214,6 @@ class FinTsAccount(SensorEntity):
                 self.name, err,
             )
             self._attr_available = False
-            # Ask HA to start the re-auth flow so the user is notified
             if self._config_entry is not None:
                 self._config_entry.async_start_reauth(self.hass)
             return
@@ -283,11 +229,7 @@ class FinTsAccount(SensorEntity):
 
 
 class FinTsHoldingsAccount(SensorEntity):
-    """Sensor for a FinTS holdings account.
-
-    A holdings account does not contain money but rather some financial
-    instruments, e.g. stocks.
-    """
+    """Sensor for a FinTS holdings account."""
 
     def __init__(
         self,
@@ -296,7 +238,6 @@ class FinTsHoldingsAccount(SensorEntity):
         name: str,
         config_entry: ConfigEntry | None = None,
     ) -> None:
-        """Initialize a FinTs holdings account."""
         self._client = client
         self._attr_name = name
         self._account = account
@@ -344,10 +285,7 @@ class FinTsHoldingsAccount(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Additional attributes of the sensor.
-
-        Lists each holding of the account with the current value.
-        """
+        """Additional attributes of the sensor."""
         attributes = {
             ATTR_ACCOUNT: self._account.accountnumber,
             ATTR_ACCOUNT_TYPE: "holdings",
@@ -355,11 +293,7 @@ class FinTsHoldingsAccount(SensorEntity):
         if self._client.name:
             attributes[ATTR_BANK] = self._client.name
         for holding in self._holdings:
-            total_name = f"{holding.name} total"
-            attributes[total_name] = holding.total_value
-            pieces_name = f"{holding.name} pieces"
-            attributes[pieces_name] = holding.pieces
-            price_name = f"{holding.name} price"
-            attributes[price_name] = holding.market_value
-
+            attributes[f"{holding.name} total"] = holding.total_value
+            attributes[f"{holding.name} pieces"] = holding.pieces
+            attributes[f"{holding.name} price"] = holding.market_value
         return attributes
