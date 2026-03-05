@@ -194,12 +194,15 @@ class FinTsAccount(SensorEntity):
 
     @property
     def device_info(self):
-        return {
+        info = {
             "identifiers": {(DOMAIN, self._client.name)},
             "name": f"FinTS - {self._client.name}",
             "manufacturer": "FinTS",
             "model": "Bank Account",
         }
+        if self._config_entry is not None:
+            info["config_entry_id"] = self._config_entry.entry_id
+        return info
 
     def _update_account_attributes(self) -> None:
         self._attr_extra_state_attributes["account_number"] = getattr(
@@ -285,12 +288,15 @@ class FinTsHoldingsAccount(SensorEntity):
 
     @property
     def device_info(self):
-        return {
+        info = {
             "identifiers": {(DOMAIN, self._client.name)},
             "name": f"FinTS - {self._client.name}",
             "manufacturer": "FinTS",
             "model": "Bank Account",
         }
+        if self._config_entry is not None:
+            info["config_entry_id"] = self._config_entry.entry_id
+        return info
 
     def update(self) -> None:
         """Get the current holdings for the account."""
