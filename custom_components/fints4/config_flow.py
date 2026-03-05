@@ -45,7 +45,6 @@ def _build_user_data_schema(user_input: dict[str, Any] | None = None) -> vol.Sch
     )
 
 
-
 def _build_fints_client(user_input: dict[str, Any]) -> FinTS3PinTanClient:
     """Construct a FinTS3PinTanClient from user_input / stored entry data.
 
@@ -73,7 +72,7 @@ def _connect(user_input: dict[str, Any]) -> tuple:
     Raises on unrecoverable errors (caught by the caller).
     """
     client = _build_fints_client(user_input)
-    _auto_bootstrap(client)
+    auto_bootstrap(client)
 
     with client:
         if isinstance(client.init_tan_response, NeedTANResponse):
@@ -120,8 +119,6 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial step: collect credentials and connect."""
-        errors: dict[str, str] = {}
-
         if user_input is None:
             return self.async_show_form(
                 step_id="user", data_schema=_build_user_data_schema()
