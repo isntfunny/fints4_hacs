@@ -116,14 +116,6 @@ def _create_entities(
             _LOGGER.debug("Skipping account %s for bank %s", account.iban, fints_name)
             continue
 
-        if not getattr(account, "currency", None):
-            _LOGGER.warning(
-                "Skipping account %s for bank %s - no currency",
-                account.iban,
-                fints_name,
-            )
-            continue
-
         account_name = account_config.get(account.iban)
         if not account_name:
             account_name = f"{fints_name} - {account.iban}"
@@ -243,7 +235,11 @@ class FinTsAccount(SensorEntity):
             return
 
         self._attr_available = True
-        if self._balance and self._balance.amount is not None:
+        if (
+            self._balance
+            and self._balance.amount
+            and getattr(self._balance.amount, "amount", None) is not None
+        ):
             self._attr_native_value = self._balance.amount
             self._attr_native_unit_of_measurement = self._balance.currency
             self._attr_extra_state_attributes["balance_date"] = (
