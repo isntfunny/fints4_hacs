@@ -16,6 +16,7 @@ from homeassistant.components.sensor import (
 from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -98,6 +99,7 @@ def setup_platform(
 
     add_entities(accounts, True)
 
+
 def _create_entities(
     client: FinTsClient,
     fints_name: str,
@@ -105,6 +107,7 @@ def _create_entities(
     holdings_config: dict[str, str | None],
     balance_accounts: list[SEPAAccount],
     holdings_accounts: list[SEPAAccount],
+    config_entry: ConfigEntry | None = None,
 ) -> list[SensorEntity]:
     """Return a list of entities for the given account lists."""
 
@@ -118,7 +121,7 @@ def _create_entities(
         account_name = account_config.get(account.iban)
         if not account_name:
             account_name = f"{fints_name} - {account.iban}"
-        accounts.append(FinTsAccount(client, account, account_name))
+        accounts.append(FinTsAccount(client, account, account_name, config_entry))
         _LOGGER.debug("Creating account %s for bank %s", account.iban, fints_name)
 
     for account in holdings_accounts:
@@ -131,7 +134,7 @@ def _create_entities(
         account_name = holdings_config.get(account.accountnumber)
         if not account_name:
             account_name = f"{fints_name} - {account.accountnumber}"
-        accounts.append(FinTsHoldingsAccount(client, account, account_name))
+        accounts.append(FinTsHoldingsAccount(client, account, account_name, config_entry))
         _LOGGER.debug(
             "Creating holdings %s for bank %s", account.accountnumber, fints_name
         )
@@ -144,7 +147,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up FinTS from a config entry."""
+    """Set up FinTS from a config entry.
+
+    If authentication fails (e.g. system_id expired after ~60 days or PIN
+    changed), ConfigEntryAuthFailed is raised.  HA will then show a
+    notification prompting the user to re-authenticate via the integration
+    page – which runs async_step_reauth / async_step_reauth_confirm.
+    """
 
     data = entry.data
     system_id = entry.data.get("system_id")
@@ -167,18 +176,33 @@ async def async_setup_entry(
     }
 
     client = FinTsClient(credentials, fints_name, account_config, holdings_config)
-    balance_accounts, holdings_accounts = await hass.async_add_executor_job(
-        client.detect_accounts
-    )
 
+    try:
+        balance_accounts, holdings_accounts = await hass.async_add_executor_job(
+            client.detect_accounts
+        )
+    except Exception as err:  # noqa: BLE001
+        err_str = str(err)
+        _LOGGER.error("FinTS connection failed for %s: %s", fints_name, err_str)
+        # Treat as an authentication error so HA triggers the re-auth flow.
+        # This covers expired system_id (60-day pushTAN renewal), wrong PIN,
+        # and similar credential issues.  Transient network errors will also
+        # land here, causing the re-auth prompt, but the user can dismiss it
+        # and the next scheduled update will retry.
+        raise ConfigEntryAuthFailed(err_str) from err
+
+    # Persist a refreshed system_id when the bank issues a new one
     new_system_id = client.system_id
     if new_system_id and new_system_id != system_id:
         hass.config_entries.async_update_entry(
             entry,
             data={**entry.data, "system_id": new_system_id},
         )
+
     accounts = _create_entities(
-        client, fints_name, account_config, holdings_config, balance_accounts, holdings_accounts
+        client, fints_name, account_config, holdings_config,
+        balance_accounts, holdings_accounts,
+        config_entry=entry,
     )
 
     async_add_entities(accounts, True)
@@ -191,11 +215,18 @@ class FinTsAccount(SensorEntity):
     also be negative.
     """
 
-    def __init__(self, client: FinTsClient, account, name: str) -> None:
+    def __init__(
+        self,
+        client: FinTsClient,
+        account: SEPAAccount,
+        name: str,
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
         """Initialize a FinTs balance account."""
         self._client = client
         self._account = account
         self._balance = None
+        self._config_entry = config_entry
         self._attr_name = name
         self._attr_icon = ICON
         self._attr_extra_state_attributes = {
@@ -223,17 +254,31 @@ class FinTsAccount(SensorEntity):
         self._attr_extra_state_attributes["subaccount_number"] = getattr(self._account, "subaccountnumber", None)
         self._attr_extra_state_attributes["account_type"] = getattr(self._account, "type", None)
         self._attr_extra_state_attributes["currency"] = getattr(self._account, "currency", None)
-        self._attr_extra_state_attributes["iban"] = getattr(self._account, "iban", None)
 
     def update(self) -> None:
         """Get the current balance and currency for the account."""
-        bank = self._client.client
-        with bank:
-            self._balance = bank.get_balance(self._account)
+        try:
+            bank = self._client.client
+            with bank:
+                self._balance = bank.get_balance(self._account)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Error updating balance for %s: %s – re-authentication may be needed",
+                self.name, err,
+            )
+            self._attr_available = False
+            # Ask HA to start the re-auth flow so the user is notified
+            if self._config_entry is not None:
+                self._config_entry.async_start_reauth(self.hass)
+            return
+
+        self._attr_available = True
         if self._balance:
             self._attr_native_value = self._balance.amount
             self._attr_native_unit_of_measurement = self._balance.currency
-            self._attr_extra_state_attributes["balance_date"] = str(self._balance.date) if self._balance.date else None
+            self._attr_extra_state_attributes["balance_date"] = (
+                str(self._balance.date) if self._balance.date else None
+            )
         _LOGGER.debug("updated balance of account %s", self.name)
 
 
@@ -244,12 +289,19 @@ class FinTsHoldingsAccount(SensorEntity):
     instruments, e.g. stocks.
     """
 
-    def __init__(self, client: FinTsClient, account, name: str) -> None:
+    def __init__(
+        self,
+        client: FinTsClient,
+        account: SEPAAccount,
+        name: str,
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
         """Initialize a FinTs holdings account."""
         self._client = client
         self._attr_name = name
         self._account = account
         self._holdings: list[Any] = []
+        self._config_entry = config_entry
         self._attr_icon = ICON
         self._attr_native_unit_of_measurement = "EUR"
         self._attr_extra_state_attributes = {
@@ -273,9 +325,21 @@ class FinTsHoldingsAccount(SensorEntity):
 
     def update(self) -> None:
         """Get the current holdings for the account."""
-        bank = self._client.client
-        with bank:
-            self._holdings = bank.get_holdings(self._account)
+        try:
+            bank = self._client.client
+            with bank:
+                self._holdings = bank.get_holdings(self._account)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Error updating holdings for %s: %s – re-authentication may be needed",
+                self.name, err,
+            )
+            self._attr_available = False
+            if self._config_entry is not None:
+                self._config_entry.async_start_reauth(self.hass)
+            return
+
+        self._attr_available = True
         self._attr_native_value = sum(h.total_value for h in self._holdings)
 
     @property

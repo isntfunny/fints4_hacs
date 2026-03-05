@@ -19,6 +19,13 @@
         "data": {
           "tan": "TAN code (leave empty for pushTAN)"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate {name}",
+        "description": "Your FinTS session has expired (this happens roughly every 60 days with pushTAN). Enter your PIN to re-authenticate. A pushTAN confirmation may follow.",
+        "data": {
+          "pin": "PIN"
+        }
       }
     },
     "error": {
@@ -29,7 +36,8 @@
       "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "reauth_successful": "Re-authentication was successful. Your session has been renewed."
     }
   }
 }
