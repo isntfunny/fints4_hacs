@@ -240,7 +240,7 @@ class FinTsAccount(SensorEntity):
             and self._balance.amount
             and getattr(self._balance.amount, "amount", None) is not None
         ):
-            self._attr_native_value = self._balance.amount
+            self._attr_native_value = self._balance.amount.amount
             self._attr_native_unit_of_measurement = self._balance.currency
             self._attr_extra_state_attributes["balance_date"] = (
                 str(self._balance.date) if self._balance.date else None
