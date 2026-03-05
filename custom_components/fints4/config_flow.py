@@ -12,6 +12,7 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
 
+from .client import auto_bootstrap
 from .const import CONF_BIN, CONF_PRODUCT_ID, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,49 +44,6 @@ def _build_user_data_schema(user_input: dict[str, Any] | None = None) -> vol.Sch
         }
     )
 
-
-def _auto_bootstrap(client: FinTS3PinTanClient, preferred_tan_code: str = "921") -> None:
-    """Non-interactively configure TAN mechanism.
-
-    Replaces minimal_interactive_cli_bootstrap for use in a non-interactive context.
-    Automatically selects pushTAN (921) if available, otherwise the first non-999 method.
-    """
-    if client.get_current_tan_mechanism():
-        return  # Already set (from persistent state / system_id)
-
-    client.fetch_tan_mechanisms()
-    mechanisms = client.get_tan_mechanisms()
-    if not mechanisms:
-        _LOGGER.warning("Bank returned no TAN mechanisms")
-        return
-
-    if preferred_tan_code in mechanisms:
-        selected = preferred_tan_code
-    else:
-        # Fall back to first mechanism that is not the single-step TAN (999)
-        selected = next(
-            (k for k in mechanisms if k != "999"),
-            list(mechanisms.keys())[0],
-        )
-
-    _LOGGER.info(
-        "Auto-selecting TAN mechanism: %s (%s)", selected, mechanisms[selected].name
-    )
-    client.set_tan_mechanism(selected)
-
-    # Some banks require choosing a TAN medium (e.g. which phone gets the pushTAN)
-    if client.selected_tan_medium is None and client.is_tan_media_required():
-        try:
-            media_result = client.get_tan_media()
-            media_list = media_result[1] if len(media_result) > 1 else []
-            if media_list:
-                client.set_tan_medium(media_list[0])
-                _LOGGER.info("Auto-selected TAN medium: %s", media_list[0])
-            else:
-                # Workaround for banks (e.g. Sparkasse) that return 3955 but accept ""
-                client.selected_tan_medium = ""
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("Could not fetch TAN media (continuing anyway): %s", exc)
 
 
 def _build_fints_client(user_input: dict[str, Any]) -> FinTS3PinTanClient:
