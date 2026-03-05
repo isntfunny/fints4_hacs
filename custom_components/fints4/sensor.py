@@ -209,8 +209,6 @@ class FinTsAccount(SensorEntity):
             "manufacturer": "FinTS",
             "model": "Bank Account",
         }
-        if self._config_entry is not None:
-            info["config_entry_id"] = self._config_entry.entry_id
         return info
 
     def _update_account_attributes(self) -> None:
@@ -318,8 +316,6 @@ class FinTsHoldingsAccount(SensorEntity):
             "manufacturer": "FinTS",
             "model": "Bank Account",
         }
-        if self._config_entry is not None:
-            info["config_entry_id"] = self._config_entry.entry_id
         return info
 
     def update(self) -> None:
