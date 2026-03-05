@@ -118,7 +118,7 @@ def _create_entities(
 
         account_name = account_config.get(account.iban)
         if not account_name:
-            account_name = f"{fints_name} - {account.iban}"
+            account_name = account.iban or account.accountnumber or "FinTS balance"
         accounts.append(FinTsAccount(client, account, account_name, config_entry))
         _LOGGER.debug("Creating account %s for bank %s", account.iban, fints_name)
 
@@ -131,7 +131,7 @@ def _create_entities(
 
         account_name = holdings_config.get(account.accountnumber)
         if not account_name:
-            account_name = f"{fints_name} - {account.accountnumber}"
+            account_name = account.accountnumber or account.iban or "FinTS holdings"
         accounts.append(
             FinTsHoldingsAccount(client, account, account_name, config_entry)
         )
@@ -228,6 +228,14 @@ class FinTsAccount(SensorEntity):
         self._attr_extra_state_attributes["currency"] = getattr(
             self._account, "currency", None
         )
+        account_info = None
+        if getattr(self._account, "iban", None):
+            account_info = self._client.get_account_information(self._account.iban)
+        if account_info:
+            for key, value in account_info.items():
+                if value is None:
+                    continue
+                self._attr_extra_state_attributes.setdefault(key, value)
 
     def update(self) -> None:
         """Get the current balance and currency for the account."""
