@@ -21,8 +21,6 @@ class FinTsClient:
     capabilities. So caching the client is beneficial.
     """
 
-    PUSHTAN_CODE = "921"
-
     def __init__(
         self,
         credentials: BankCredentials,
@@ -52,32 +50,6 @@ class FinTsClient:
             )
         return self._client
 
-    def init_tan_mechanism(self) -> None:
-        """Initialize TAN mechanism (pushTAN if available)."""
-        if not self._client:
-            return
-        try:
-            with self._client:
-                mechanisms = self._client.get_tan_mechanisms()
-                if not mechanisms:
-                    _LOGGER.warning("No TAN mechanisms available")
-                    return
-
-                if self.PUSHTAN_CODE in mechanisms:
-                    _LOGGER.info("Using pushTAN (%s)", self.PUSHTAN_CODE)
-                    self._client.set_tan_mechanism(self.PUSHTAN_CODE)
-                    if mechanisms[self.PUSHTAN_CODE].description_required:
-                        try:
-                            media = self._client.get_tan_media()
-                            if media and len(media) > 1 and media[1]:
-                                self._client.set_tan_medium(media[1][0])
-                        except Exception as e:
-                            _LOGGER.warning("Could not set TAN medium: %s", e)
-                else:
-                    _LOGGER.warning("pushTAN (921) not available, available: %s", list(mechanisms.keys()))
-        except Exception as e:
-            _LOGGER.warning("Could not initialize TAN mechanism: %s", e)
-
     @property
     def system_id(self) -> str | None:
         """Get the system ID from the client."""
@@ -86,13 +58,7 @@ class FinTsClient:
         return None
 
     def get_account_information(self, iban: str) -> dict[str, Any] | None:
-        """Get account information for an IBAN, if available."""
-        if not self._account_information_fetched:
-            info = self.client.get_information()
-            self._account_information = {
-                account["iban"]: account for account in info.get("accounts", [])
-            }
-            self._account_information_fetched = True
+        """Get account information for an IBAN, if available (uses cached data)."""
         return self._account_information.get(iban)
 
     def is_balance_account(self, account: SEPAAccount) -> bool:
@@ -136,11 +102,31 @@ class FinTsClient:
         return False
 
     def detect_accounts(self) -> tuple[list[SEPAAccount], list[SEPAAccount]]:
-        """Identify the accounts of the bank."""
+        """Identify the accounts of the bank.
+
+        Opens a single authenticated dialog to fetch both the account list and
+        the account information (used for type classification).
+        """
         balance_accounts: list[SEPAAccount] = []
         holdings_accounts: list[SEPAAccount] = []
 
-        for account in self.client.get_sepa_accounts():
+        with self.client:
+            sepa_accounts = self.client.get_sepa_accounts()
+
+            # Pre-fetch account type information while the dialog is open
+            if not self._account_information_fetched:
+                try:
+                    info = self.client.get_information()
+                    self._account_information = {
+                        account["iban"]: account
+                        for account in info.get("accounts", [])
+                        if account.get("iban")
+                    }
+                    self._account_information_fetched = True
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning("Could not fetch account information: %s", exc)
+
+        for account in sepa_accounts:
             if self.is_balance_account(account):
                 balance_accounts.append(account)
             elif self.is_holdings_account(account):
@@ -153,4 +139,3 @@ class FinTsClient:
                 )
 
         return balance_accounts, holdings_accounts
-

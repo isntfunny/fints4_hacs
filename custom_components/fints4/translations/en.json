@@ -10,17 +10,34 @@
           "pin": "PIN",
           "url": "Bank URL",
           "name": "Name (optional)",
-          "product_id": "Product ID"
+          "product_id": "Product ID (optional)"
+        }
+      },
+      "confirm_tan": {
+        "title": "TAN required",
+        "description": "Your bank requires authentication:\n\n**{challenge}**\n\nFor pushTAN / decoupled: confirm the request in your banking app, then click Submit.\nFor other TAN methods: enter the TAN code below.",
+        "data": {
+          "tan": "TAN code (leave empty for pushTAN)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate {name}",
+        "description": "Your FinTS session has expired (this happens roughly every 60 days with pushTAN). Enter your PIN to re-authenticate. A pushTAN confirmation may follow.",
+        "data": {
+          "pin": "PIN"
         }
       }
     },
     "error": {
-      "cannot_connect": "Could not connect to the bank with the provided details.",
-      "auth": "Authentication failed.",
+      "cannot_connect": "Could not connect to the bank. Please check the URL and your credentials.",
+      "auth": "Authentication failed. Please check username and PIN.",
+      "tan_failed": "Sending the TAN failed. Please try again.",
+      "not_confirmed_yet": "The request has not been confirmed in your banking app yet. Please confirm and try again.",
       "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "This account is already configured."
+      "already_configured": "This account is already configured.",
+      "reauth_successful": "Re-authentication was successful. Your session has been renewed."
     }
   }
 }
