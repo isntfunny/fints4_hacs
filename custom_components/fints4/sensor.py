@@ -32,6 +32,15 @@ from .const import (
     DOMAIN,
 )
 
+
+def _serialize_attribute_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool, list, dict)):
+        return value
+    return str(value)
+
+
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(hours=4)
@@ -223,8 +232,8 @@ class FinTsAccount(SensorEntity):
         self._attr_extra_state_attributes["account_type"] = getattr(
             self._account, "type", None
         )
-        self._attr_extra_state_attributes["currency"] = getattr(
-            self._account, "currency", None
+        self._attr_extra_state_attributes["currency"] = _serialize_attribute_value(
+            getattr(self._account, "currency", None)
         )
         account_info = None
         if getattr(self._account, "iban", None):
@@ -233,7 +242,9 @@ class FinTsAccount(SensorEntity):
             for key, value in account_info.items():
                 if value is None:
                     continue
-                self._attr_extra_state_attributes.setdefault(key, value)
+                self._attr_extra_state_attributes.setdefault(
+                    key, _serialize_attribute_value(value)
+                )
 
     def update(self) -> None:
         """Get the current balance and currency for the account."""
