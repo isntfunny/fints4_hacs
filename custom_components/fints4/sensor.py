@@ -88,7 +88,12 @@ def setup_platform(
     client = FinTsClient(credentials, fints_name, account_config, holdings_config)
     balance_accounts, holdings_accounts = client.detect_accounts()
     accounts = _create_entities(
-        client, fints_name, account_config, holdings_config, balance_accounts, holdings_accounts
+        client,
+        fints_name,
+        account_config,
+        holdings_config,
+        balance_accounts,
+        holdings_accounts,
     )
     add_entities(accounts, True)
 
@@ -111,6 +116,14 @@ def _create_entities(
             _LOGGER.debug("Skipping account %s for bank %s", account.iban, fints_name)
             continue
 
+        if not getattr(account, "currency", None):
+            _LOGGER.warning(
+                "Skipping account %s for bank %s - no currency",
+                account.iban,
+                fints_name,
+            )
+            continue
+
         account_name = account_config.get(account.iban)
         if not account_name:
             account_name = f"{fints_name} - {account.iban}"
@@ -127,7 +140,9 @@ def _create_entities(
         account_name = holdings_config.get(account.accountnumber)
         if not account_name:
             account_name = f"{fints_name} - {account.accountnumber}"
-        accounts.append(FinTsHoldingsAccount(client, account, account_name, config_entry))
+        accounts.append(
+            FinTsHoldingsAccount(client, account, account_name, config_entry)
+        )
         _LOGGER.debug(
             "Creating holdings %s for bank %s", account.accountnumber, fints_name
         )
@@ -195,12 +210,20 @@ class FinTsAccount(SensorEntity):
         }
 
     def _update_account_attributes(self) -> None:
-        self._attr_extra_state_attributes["account_number"] = getattr(self._account, "accountnumber", None)
+        self._attr_extra_state_attributes["account_number"] = getattr(
+            self._account, "accountnumber", None
+        )
         self._attr_extra_state_attributes["iban"] = getattr(self._account, "iban", None)
         self._attr_extra_state_attributes["bic"] = getattr(self._account, "bic", None)
-        self._attr_extra_state_attributes["subaccount_number"] = getattr(self._account, "subaccountnumber", None)
-        self._attr_extra_state_attributes["account_type"] = getattr(self._account, "type", None)
-        self._attr_extra_state_attributes["currency"] = getattr(self._account, "currency", None)
+        self._attr_extra_state_attributes["subaccount_number"] = getattr(
+            self._account, "subaccountnumber", None
+        )
+        self._attr_extra_state_attributes["account_type"] = getattr(
+            self._account, "type", None
+        )
+        self._attr_extra_state_attributes["currency"] = getattr(
+            self._account, "currency", None
+        )
 
     def update(self) -> None:
         """Get the current balance and currency for the account."""
@@ -211,7 +234,8 @@ class FinTsAccount(SensorEntity):
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
                 "Error updating balance for %s: %s – re-authentication may be needed",
-                self.name, err,
+                self.name,
+                err,
             )
             self._attr_available = False
             if self._config_entry is not None:
@@ -219,12 +243,18 @@ class FinTsAccount(SensorEntity):
             return
 
         self._attr_available = True
-        if self._balance:
+        if self._balance and self._balance.amount is not None:
             self._attr_native_value = self._balance.amount
             self._attr_native_unit_of_measurement = self._balance.currency
             self._attr_extra_state_attributes["balance_date"] = (
                 str(self._balance.date) if self._balance.date else None
             )
+        else:
+            _LOGGER.warning(
+                "Balance for %s has no amount/currency - skipping this account",
+                self.name,
+            )
+            self._attr_available = False
         _LOGGER.debug("updated balance of account %s", self.name)
 
 
@@ -251,7 +281,9 @@ class FinTsHoldingsAccount(SensorEntity):
         }
         if self._client.name:
             self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
-        self._attr_extra_state_attributes["account_number"] = getattr(account, "accountnumber", None)
+        self._attr_extra_state_attributes["account_number"] = getattr(
+            account, "accountnumber", None
+        )
         self._attr_extra_state_attributes["iban"] = getattr(account, "iban", None)
         self._attr_extra_state_attributes["bic"] = getattr(account, "bic", None)
 
@@ -273,7 +305,8 @@ class FinTsHoldingsAccount(SensorEntity):
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
                 "Error updating holdings for %s: %s – re-authentication may be needed",
-                self.name, err,
+                self.name,
+                err,
             )
             self._attr_available = False
             if self._config_entry is not None:
