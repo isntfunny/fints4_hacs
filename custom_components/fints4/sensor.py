@@ -236,7 +236,7 @@ class FinTsAccount(SensorEntity):
 
         self._attr_available = True
         if (
-            self._balance
+            self._balance is not None
             and self._balance.amount
             and getattr(self._balance.amount, "amount", None) is not None
         ):
@@ -310,19 +310,29 @@ class FinTsHoldingsAccount(SensorEntity):
             return
 
         self._attr_available = True
-        self._attr_native_value = sum(h.total_value for h in self._holdings)
+        total = sum(
+            h.total_value
+            for h in self._holdings
+            if getattr(h, "total_value", None) is not None
+        )
+        self._attr_native_value = total if total else 0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Additional attributes of the sensor."""
         attributes = {
-            ATTR_ACCOUNT: self._account.accountnumber,
+            ATTR_ACCOUNT: getattr(self._account, "accountnumber", None),
             ATTR_ACCOUNT_TYPE: "holdings",
         }
         if self._client.name:
             attributes[ATTR_BANK] = self._client.name
         for holding in self._holdings:
-            attributes[f"{holding.name} total"] = holding.total_value
-            attributes[f"{holding.name} pieces"] = holding.pieces
-            attributes[f"{holding.name} price"] = holding.market_value
+            if holding.name:
+                attributes[f"{holding.name} total"] = getattr(
+                    holding, "total_value", None
+                )
+                attributes[f"{holding.name} pieces"] = getattr(holding, "pieces", None)
+                attributes[f"{holding.name} price"] = getattr(
+                    holding, "market_value", None
+                )
         return attributes
