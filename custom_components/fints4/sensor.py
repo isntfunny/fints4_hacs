@@ -182,6 +182,15 @@ class FinTsAccount(SensorEntity):
         self._account = account
         self._balance = None
         self._config_entry = config_entry
+        account_identifier = (
+            getattr(account, "iban", None)
+            or getattr(account, "accountnumber", None)
+            or self._client.name
+        )
+        unique_id = f"{self._client.name}_{account_identifier}_balance"
+        if self._config_entry:
+            unique_id = f"{self._config_entry.entry_id}_{unique_id}"
+        self._attr_unique_id = unique_id
         self._attr_name = name
         self._attr_icon = ICON
         self._attr_extra_state_attributes = {
@@ -272,6 +281,13 @@ class FinTsHoldingsAccount(SensorEntity):
         self._account = account
         self._holdings: list[Any] = []
         self._config_entry = config_entry
+        account_identifier = (
+            getattr(account, "accountnumber", None) or self._client.name
+        )
+        unique_id = f"{self._client.name}_{account_identifier}_holdings"
+        if self._config_entry:
+            unique_id = f"{self._config_entry.entry_id}_{unique_id}"
+        self._attr_unique_id = unique_id
         self._attr_icon = ICON
         self._attr_native_unit_of_measurement = "EUR"
         self._attr_extra_state_attributes = {
