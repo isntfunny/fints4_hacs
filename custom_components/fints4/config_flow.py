@@ -73,7 +73,7 @@ def _connect(user_input: dict[str, Any]) -> tuple:
     Raises on unrecoverable errors (caught by the caller).
     """
     client = _build_fints_client(user_input)
-    _auto_bootstrap(client)
+    auto_bootstrap(client)
 
     with client:
         if isinstance(client.init_tan_response, NeedTANResponse):
