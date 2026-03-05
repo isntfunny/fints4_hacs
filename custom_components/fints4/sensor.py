@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from functools import cached_property
 import logging
 from typing import Any, cast
 
@@ -14,6 +15,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
 )
 from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
@@ -34,10 +36,12 @@ from .const import (
 
 
 def _serialize_attribute_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (str, int, float, bool, list, dict)):
+    if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, list):
+        return [_serialize_attribute_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _serialize_attribute_value(v) for k, v in value.items()}
     return str(value)
 
 
@@ -127,7 +131,7 @@ def _create_entities(
 
         account_name = account_config.get(account.iban)
         if not account_name:
-            account_name = account.iban or account.accountnumber or "FinTS balance"
+            account_name = account.accountnumber or account.iban or "FinTS balance"
         accounts.append(FinTsAccount(client, account, account_name, config_entry))
         _LOGGER.debug("Creating account %s for bank %s", account.iban, fints_name)
 
@@ -210,15 +214,14 @@ class FinTsAccount(SensorEntity):
             self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
         self._update_account_attributes()
 
-    @property
-    def device_info(self):
-        info = {
-            "identifiers": {(DOMAIN, self._client.name)},
-            "name": f"FinTS - {self._client.name}",
-            "manufacturer": "FinTS",
-            "model": "Bank Account",
-        }
-        return info
+    @cached_property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._client.name or "unknown")},
+            name=f"FinTS - {self._client.name or 'Unknown'}",
+            manufacturer="FinTS",
+            model="Bank Account",
+        )
 
     def _update_account_attributes(self) -> None:
         self._attr_extra_state_attributes["account_number"] = getattr(
@@ -228,9 +231,6 @@ class FinTsAccount(SensorEntity):
         self._attr_extra_state_attributes["bic"] = getattr(self._account, "bic", None)
         self._attr_extra_state_attributes["subaccount_number"] = getattr(
             self._account, "subaccountnumber", None
-        )
-        self._attr_extra_state_attributes["account_type"] = getattr(
-            self._account, "type", None
         )
         self._attr_extra_state_attributes["currency"] = _serialize_attribute_value(
             getattr(self._account, "currency", None)
@@ -319,15 +319,14 @@ class FinTsHoldingsAccount(SensorEntity):
         self._attr_extra_state_attributes["iban"] = getattr(account, "iban", None)
         self._attr_extra_state_attributes["bic"] = getattr(account, "bic", None)
 
-    @property
-    def device_info(self):
-        info = {
-            "identifiers": {(DOMAIN, self._client.name)},
-            "name": f"FinTS - {self._client.name}",
-            "manufacturer": "FinTS",
-            "model": "Bank Account",
-        }
-        return info
+    @cached_property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._client.name or "unknown")},
+            name=f"FinTS - {self._client.name or 'Unknown'}",
+            manufacturer="FinTS",
+            model="Bank Account",
+        )
 
     def update(self) -> None:
         """Get the current holdings for the account."""
@@ -357,19 +356,16 @@ class FinTsHoldingsAccount(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Additional attributes of the sensor."""
-        attributes = {
-            ATTR_ACCOUNT: getattr(self._account, "accountnumber", None),
-            ATTR_ACCOUNT_TYPE: "holdings",
-        }
-        if self._client.name:
-            attributes[ATTR_BANK] = self._client.name
+        attributes = dict(self._attr_extra_state_attributes)
         for holding in self._holdings:
             if holding.name:
-                attributes[f"{holding.name} total"] = getattr(
-                    holding, "total_value", None
+                attributes[f"{holding.name} total"] = _serialize_attribute_value(
+                    getattr(holding, "total_value", None)
                 )
-                attributes[f"{holding.name} pieces"] = getattr(holding, "pieces", None)
-                attributes[f"{holding.name} price"] = getattr(
-                    holding, "market_value", None
+                attributes[f"{holding.name} pieces"] = _serialize_attribute_value(
+                    getattr(holding, "pieces", None)
+                )
+                attributes[f"{holding.name} price"] = _serialize_attribute_value(
+                    getattr(holding, "market_value", None)
                 )
         return attributes
