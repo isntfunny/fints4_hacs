@@ -34,9 +34,7 @@ from .const import (
 )
 
 
-def _serialize_attribute_value(
-    value: Any, depth: int = 0, max_depth: int = 10
-) -> Any:
+def _serialize_attribute_value(value: Any, depth: int = 0, max_depth: int = 10) -> Any:
     """Serialize attribute values, converting non-JSON types to strings.
 
     Includes recursion depth limit to prevent stack overflow on deeply nested structures.
@@ -48,10 +46,10 @@ def _serialize_attribute_value(
     if isinstance(value, list):
         return [_serialize_attribute_value(v, depth + 1, max_depth) for v in value]
     if isinstance(value, dict):
-        return {
-            k: _serialize_attribute_value(v, depth + 1, max_depth)
-            for k, v in value.items()
-        }
+        serialized: dict[str, Any] = {}
+        for key, val in value.items():
+            serialized[str(key)] = _serialize_attribute_value(val, depth + 1, max_depth)
+        return serialized
     return str(value)
 
 
@@ -73,6 +71,7 @@ def _get_device_info(client_name: str | None) -> DeviceInfo:
         manufacturer="FinTS",
         model="Bank Account",
     )
+
 
 ATTR_ACCOUNT = CONF_ACCOUNT
 
