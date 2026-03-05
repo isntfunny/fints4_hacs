@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
-from fints.client import NeedTANResponse
-from fints.exceptions import FinTSClientError
-from fints.utils import minimal_interactive_cli_bootstrap
+from fints.client import FinTS3PinTanClient, NeedTANResponse
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResult
 
-from .client import BankCredentials, FinTsClient
 from .const import CONF_BIN, CONF_PRODUCT_ID, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+CONF_TAN = "tan"
+
 
 def _build_user_data_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
     defaults = user_input or {}
@@ -45,24 +44,68 @@ def _build_user_data_schema(user_input: dict[str, Any] | None = None) -> vol.Sch
     )
 
 
+def _auto_bootstrap(client: FinTS3PinTanClient, preferred_tan_code: str = "921") -> None:
+    """Non-interactively configure TAN mechanism.
+
+    Replaces minimal_interactive_cli_bootstrap for use in a non-interactive context.
+    Automatically selects pushTAN (921) if available, otherwise the first non-999 method.
+    """
+    if client.get_current_tan_mechanism():
+        return  # Already set (from persistent state / system_id)
+
+    client.fetch_tan_mechanisms()
+    mechanisms = client.get_tan_mechanisms()
+    if not mechanisms:
+        _LOGGER.warning("Bank returned no TAN mechanisms")
+        return
+
+    if preferred_tan_code in mechanisms:
+        selected = preferred_tan_code
+    else:
+        # Fall back to first mechanism that is not the single-step TAN (999)
+        selected = next(
+            (k for k in mechanisms if k != "999"),
+            list(mechanisms.keys())[0],
+        )
+
+    _LOGGER.info(
+        "Auto-selecting TAN mechanism: %s (%s)", selected, mechanisms[selected].name
+    )
+    client.set_tan_mechanism(selected)
+
+    # Some banks require choosing a TAN medium (e.g. which phone gets the pushTAN)
+    if client.selected_tan_medium is None and client.is_tan_media_required():
+        try:
+            media_result = client.get_tan_media()
+            media_list = media_result[1] if len(media_result) > 1 else []
+            if media_list:
+                client.set_tan_medium(media_list[0])
+                _LOGGER.info("Auto-selected TAN medium: %s", media_list[0])
+            else:
+                # Workaround for banks (e.g. Sparkasse) that return 3955 but accept ""
+                client.selected_tan_medium = ""
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Could not fetch TAN media (continuing anyway): %s", exc)
+
+
 class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle FinTS config flow."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
-    _pending_client: FinTsClient | None = None
-    _tan_request: NeedTANResponse | None = None
-    _dialog_data: Any | None = None
-    _user_input: dict[str, Any] | None = None
-    _tan_task: asyncio.Task | None = None
-    _tan_error: bool = False
-    _tan_sent: bool = False
+
+    def __init__(self) -> None:
+        """Initialize."""
+        self._user_input: dict[str, Any] = {}
+        self._raw_client: FinTS3PinTanClient | None = None
+        self._dialog_data: Any = None
+        self._tan_request: NeedTANResponse | None = None
+        self._tan_challenge: str = ""
+        self._tan_decoupled: bool = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step."""
-
+        """Handle the initial step: connect to the bank."""
         errors: dict[str, str] = {}
 
         if user_input is None:
@@ -70,262 +113,136 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 step_id="user", data_schema=_build_user_data_schema()
             )
 
-        credentials = BankCredentials(
-            user_input[CONF_BIN],
-            user_input[CONF_USERNAME],
-            user_input[CONF_PIN],
-            user_input[CONF_URL],
-            user_input.get(CONF_PRODUCT_ID),
-            None,
-        )
+        self._user_input = user_input
 
-        client = FinTsClient(
-            credentials,
-            user_input.get(CONF_NAME) or user_input[CONF_BIN],
-            {},
-            {},
-        )
-
-        client = FinTsClient(
-            credentials,
-            user_input.get(CONF_NAME) or user_input[CONF_BIN],
-            {},
-            {},
-        )
-
-        try:
-            await self.hass.async_add_executor_job(
-                minimal_interactive_cli_bootstrap, client.client
+        def _connect() -> tuple:
+            """Connect to bank, run bootstrap, check for TAN requirement."""
+            client = FinTS3PinTanClient(
+                user_input[CONF_BIN],
+                user_input[CONF_USERNAME],
+                user_input[CONF_PIN],
+                user_input[CONF_URL],
+                product_id=user_input.get(CONF_PRODUCT_ID) or None,
             )
-            _LOGGER.info("Bootstrap completed")
-        except Exception as e:
-            _LOGGER.warning("Error during bootstrap: %s", e)
+            _auto_bootstrap(client)
 
-        self._pending_client = client
+            with client:
+                if isinstance(client.init_tan_response, NeedTANResponse):
+                    # A TAN is required for login (common with pushTAN / decoupled)
+                    tan_request = client.init_tan_response
+                    dialog_data = client.pause_dialog()
+                    # Exiting `with client:` here does NOT end the dialog (it is paused)
+                    return "need_tan", client, tan_request, dialog_data
 
-        def try_get_accounts():
-            with client.client:
-                return client.client.get_sepa_accounts()
+                # No TAN needed – already authenticated
+                system_id = getattr(client, "system_id", None)
+                return "ok", system_id
 
         try:
-            accounts = await self.hass.async_add_executor_job(try_get_accounts)
+            result = await self.hass.async_add_executor_job(_connect)
         except Exception as err:  # noqa: BLE001
-            err_str = str(err)
-            if "NeedTANResponse" in type(err).__name__ or "NeedTANResponse" in err_str:
-                _LOGGER.info("TAN required, showing confirm button")
-                return await self.async_step_confirm_tan()
-
             _LOGGER.exception("Error connecting to bank: %s", err)
             errors["base"] = "cannot_connect"
-            self._user_input = user_input
             return self.async_show_form(
                 step_id="user",
                 data_schema=_build_user_data_schema(user_input),
                 errors=errors,
             )
 
-        if accounts:
-            system_id = getattr(client.client, "system_id", None)
-            await self.async_set_unique_id(
-                f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
+        if result[0] == "need_tan":
+            _, self._raw_client, self._tan_request, self._dialog_data = result
+            self._tan_challenge = getattr(self._tan_request, "challenge", "") or ""
+            self._tan_decoupled = bool(getattr(self._tan_request, "decoupled", False))
+            _LOGGER.info(
+                "TAN required (decoupled=%s). Challenge: %s",
+                self._tan_decoupled,
+                self._tan_challenge,
             )
-            self._abort_if_unique_id_configured()
-            entry_data = {**user_input}
-            if system_id:
-                entry_data["system_id"] = system_id
-            return self.async_create_entry(
-                title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
-                data=entry_data,
-            )
+            return await self.async_step_confirm_tan()
 
-        errors["base"] = "cannot_connect"
-        self._user_input = user_input
-        return self.async_show_form(
-            step_id="user",
-            data_schema=_build_user_data_schema(user_input),
-            errors=errors,
-        )
+        _, system_id = result
+        return await self._async_create_entry(system_id)
 
     async def async_step_confirm_tan(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Show a button to confirm after TAN is accepted."""
-        if user_input is not None:
-            return await self.async_step_tan_confirmed()
+        """Show TAN challenge; user confirms on phone (pushTAN) or enters a TAN code."""
+        errors: dict[str, str] = {}
 
-        return self.async_show_form(
-            step_id="confirm_tan",
-            data_schema=vol.Schema({}),
-            description_placeholders={
-                "message": "Bitte bestätige die pushTAN auf deinem Smartphone und klicke dann auf 'Weiter'."
-            },
-        )
-
-    async def async_step_tan_confirmed(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Try to get accounts after user confirmed TAN."""
-        if not self._pending_client:
+        if not self._raw_client:
+            # Session lost (e.g. HA restart during flow) – restart from scratch
             return self.async_show_form(
                 step_id="user",
                 data_schema=_build_user_data_schema(self._user_input),
                 errors={"base": "unknown"},
             )
 
-        def try_get_accounts():
-            with self._pending_client.client:
-                return self._pending_client.client.get_sepa_accounts()
+        if user_input is not None:
+            # For decoupled (pushTAN) the TAN value is ignored by the bank; send "".
+            # For all other methods the user has typed in the TAN code.
+            tan_value = "" if self._tan_decoupled else user_input.get(CONF_TAN, "").strip()
 
-        try:
-            accounts = await self.hass.async_add_executor_job(try_get_accounts)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.exception("Error after TAN confirm: %s", err)
-            return await self.async_step_confirm_tan()
+            raw_client = self._raw_client
+            tan_request = self._tan_request
+            dialog_data = self._dialog_data
 
-        if accounts:
-            system_id = getattr(self._pending_client.client, "system_id", None)
-            assert self._user_input is not None
-            await self.async_set_unique_id(
-                f"{self._user_input[CONF_BIN]}-{self._user_input[CONF_USERNAME]}"
-            )
-            self._abort_if_unique_id_configured()
-            entry_data = {**self._user_input}
-            if system_id:
-                entry_data["system_id"] = system_id
-            return self.async_create_entry(
-                title=self._user_input.get(CONF_NAME) or self._user_input[CONF_BIN],
-                data=entry_data,
-            )
+            def _send_tan() -> tuple:
+                """Resume the paused dialog and send the TAN."""
+                with raw_client.resume_dialog(dialog_data):
+                    result = raw_client.send_tan(tan_request, tan_value)
 
-        return await self.async_step_confirm_tan()
+                    if isinstance(result, NeedTANResponse):
+                        # Decoupled: app not yet confirmed; or wrong TAN entered.
+                        # Pause the dialog again so we can retry.
+                        new_dialog_data = raw_client.pause_dialog()
+                        return "need_tan_again", result, new_dialog_data
 
-    async def _handle_tan_challenge(
-        self,
-        user_input: dict[str, Any],
-        client: FinTsClient,
-        challenge: NeedTANResponse,
-        dialog_data: Any = None,
-    ) -> None:
-        """Store state so we can finish after pushTAN."""
-        self._pending_client = client
-        self._tan_request = challenge
-        if dialog_data is not None:
-            self._dialog_data = dialog_data
-        else:
-            self._dialog_data = client.client.pause_dialog()
-        self._user_input = user_input
-        self._tan_task = None
-        self._tan_error = False
-        self._tan_sent = False
+                    system_id = getattr(raw_client, "system_id", None)
+                    return "ok", system_id
 
-    async def async_step_wait_for_tan(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Show progress while waiting for pushTAN confirmation."""
-
-        if user_input:
-            if self._tan_error:
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=_build_user_data_schema(self._user_input),
-                    errors={"base": "tan_failed"},
-                )
-            return self.async_show_progress_done(next_step_id="tan_done")
-
-        if self._tan_task is None or self._tan_task.done():
-            self._tan_task = self.hass.async_create_task(self._wait_for_tan())
-
-        description = "Bitte bestätige die pushTAN auf deinem Smartphone."
-        return self.async_show_progress(
-            step_id="wait_for_tan",
-            progress_action="wait_for_tan",
-            description_placeholders={"description": description},
-            progress_task=self._tan_task,
-        )
-
-    async def _wait_for_tan(self) -> None:
-        """Background task that polls for the pushTAN completion."""
-
-        for _ in range(6):
-            await asyncio.sleep(10)
-            success = await self.hass.async_add_executor_job(self._send_pending_tan)
-            if success:
-                await self.hass.config_entries.flow.async_configure(
-                    self.flow_id, user_input={}
-                )
-                return
-
-        self._tan_error = True
-        await self.hass.config_entries.flow.async_configure(
-            self.flow_id, user_input={"error": "timeout"}
-        )
-
-    def _send_pending_tan(self) -> bool:
-        """Attempt to send the pending pushTAN challenge."""
-
-        if (
-            not self._pending_client
-            or not self._tan_request
-        ):
-            _LOGGER.info("Missing client or tan_request")
-            return False
-
-        try:
-            with self._pending_client.client:
-                if self._tan_request.decoupled:
-                    import time
-                    if not self._tan_sent:
-                        _LOGGER.info("Decoupled TAN - waiting 30s and sending empty TAN...")
-                        time.sleep(30)
-                        self._tan_sent = True
-
-                    _LOGGER.info("Sending empty TAN for decoupled...")
-                    self._pending_client.client.send_tan(self._tan_request, "")
+            try:
+                result = await self.hass.async_add_executor_job(_send_tan)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("Error sending TAN: %s", err)
+                errors["base"] = "tan_failed"
+            else:
+                if result[0] == "need_tan_again":
+                    _, new_tan_request, new_dialog_data = result
+                    self._tan_request = new_tan_request
+                    self._dialog_data = new_dialog_data
+                    errors["base"] = "not_confirmed_yet"
                 else:
-                    self._pending_client.client.send_tan(self._tan_request, "")
+                    _, system_id = result
+                    return await self._async_create_entry(system_id)
 
-                _LOGGER.info("Checking client.init_tan_response...")
-                if isinstance(self._pending_client.client.init_tan_response, NeedTANResponse):
-                    _LOGGER.info("TAN still needed: %s", self._pending_client.client.init_tan_response)
-                    self._tan_request = self._pending_client.client.init_tan_response
-                    return False
+        # Build form: decoupled needs no input (just a confirm button)
+        if self._tan_decoupled:
+            schema = vol.Schema({})
+        else:
+            schema = vol.Schema({vol.Optional(CONF_TAN, default=""): str})
 
-                _LOGGER.info("TAN confirmed - getting accounts...")
-                accounts = self._pending_client.client.get_sepa_accounts()
-                if accounts:
-                    _LOGGER.info("Got %d accounts - success!", len(accounts))
-                    return True
+        challenge = self._tan_challenge or "Bitte in der Banking-App bestätigen."
+        return self.async_show_form(
+            step_id="confirm_tan",
+            data_schema=schema,
+            description_placeholders={"challenge": challenge},
+            errors=errors,
+        )
 
-                _LOGGER.info("No accounts returned")
-                return False
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.exception("Error while sending pushTAN: %s", err)
-            self._tan_error = True
-            return False
-
-        return True
-
-    async def async_step_tan_done(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Finish the flow once the pushTAN is confirmed."""
-
-        assert self._user_input is not None
+    async def _async_create_entry(self, system_id: str | None) -> FlowResult:
+        """Create the config entry once authentication is complete."""
+        user_input = self._user_input
         await self.async_set_unique_id(
-            f"{self._user_input[CONF_BIN]}-{self._user_input[CONF_USERNAME]}"
+            f"{user_input[CONF_BIN]}-{user_input[CONF_USERNAME]}"
         )
         self._abort_if_unique_id_configured()
 
-        system_id = None
-        if self._pending_client:
-            system_id = getattr(self._pending_client.client, "system_id", None)
-
-        entry_data = {**self._user_input}
+        entry_data = dict(user_input)
         if system_id:
             entry_data["system_id"] = system_id
             _LOGGER.info("Saving system_id: %s", system_id)
 
         return self.async_create_entry(
-            title=self._user_input.get(CONF_NAME) or self._user_input[CONF_BIN],
+            title=user_input.get(CONF_NAME) or user_input[CONF_BIN],
             data=entry_data,
         )

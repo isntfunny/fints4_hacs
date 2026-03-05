@@ -228,7 +228,8 @@ class FinTsAccount(SensorEntity):
     def update(self) -> None:
         """Get the current balance and currency for the account."""
         bank = self._client.client
-        self._balance = bank.get_balance(self._account)
+        with bank:
+            self._balance = bank.get_balance(self._account)
         if self._balance:
             self._attr_native_value = self._balance.amount
             self._attr_native_unit_of_measurement = self._balance.currency
@@ -273,7 +274,8 @@ class FinTsHoldingsAccount(SensorEntity):
     def update(self) -> None:
         """Get the current holdings for the account."""
         bank = self._client.client
-        self._holdings = bank.get_holdings(self._account)
+        with bank:
+            self._holdings = bank.get_holdings(self._account)
         self._attr_native_value = sum(h.total_value for h in self._holdings)
 
     @property
