@@ -123,7 +123,9 @@ class FinTsClient:
 
         account_information = self.get_account_information(account.iban)
         if not account_information:
-            return False
+            # get_information() failed or account not yet indexed.
+            # Fall back: include when no explicit account filter is configured.
+            return not self.account_config
 
         if account_type := account_information.get("type"):
             return 1 <= account_type <= 9
@@ -134,16 +136,28 @@ class FinTsClient:
         ):
             return True
 
-        return False
+        # Type info present but outside 1-9 range and not in explicit config.
+        return not self.account_config
 
     def is_holdings_account(self, account: SEPAAccount) -> bool:
-        """Determine if the given account is of type holdings account."""
-        if not account.iban:
-            return False
+        """Determine if the given account is of type holdings account.
 
-        account_information = self.get_account_information(account.iban)
+        German depot (Wertpapierdepot) accounts typically have no IBAN –
+        only an account number – so we must not short-circuit on missing IBAN.
+        """
+        iban = account.iban
+        account_number = getattr(account, "accountnumber", None)
+
+        # Look up type info by IBAN (available for most accounts)
+        account_information = self.get_account_information(iban) if iban else None
+
         if not account_information:
-            return False
+            # No type info available.
+            if self.holdings_config:
+                # Explicit filter: include only if account number is listed
+                return bool(account_number and account_number in self.holdings_config)
+            # Auto-detect: treat as holdings when there is an account number but no IBAN
+            return bool(account_number and not iban)
 
         if account_type := account_information.get("type"):
             return 30 <= account_type <= 39
@@ -154,7 +168,7 @@ class FinTsClient:
         ):
             return True
 
-        return False
+        return not self.holdings_config and not iban
 
     def detect_accounts(self) -> tuple[list[SEPAAccount], list[SEPAAccount]]:
         """Identify the accounts of the bank.

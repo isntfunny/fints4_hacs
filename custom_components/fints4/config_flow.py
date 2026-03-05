@@ -45,7 +45,6 @@ def _build_user_data_schema(user_input: dict[str, Any] | None = None) -> vol.Sch
     )
 
 
-
 def _build_fints_client(user_input: dict[str, Any]) -> FinTS3PinTanClient:
     """Construct a FinTS3PinTanClient from user_input / stored entry data.
 
@@ -120,8 +119,6 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the initial step: collect credentials and connect."""
-        errors: dict[str, str] = {}
-
         if user_input is None:
             return self.async_show_form(
                 step_id="user", data_schema=_build_user_data_schema()
