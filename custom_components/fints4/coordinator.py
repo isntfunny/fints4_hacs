@@ -156,7 +156,7 @@ class FinTsDataUpdateCoordinator(DataUpdateCoordinator[FinTsCoordinatorData]):
         return data
 
     def _fetch_all(self) -> FinTsCoordinatorData:
-        """Synchronous fetch: opens ONE dialog for all operations."""
+        """Synchronous fetch within a single FinTS client context."""
         result = FinTsCoordinatorData()
         today = date.today()
         start_date = today - timedelta(days=TRANSACTION_LOOKBACK_DAYS)
@@ -178,15 +178,22 @@ class FinTsDataUpdateCoordinator(DataUpdateCoordinator[FinTsCoordinatorData]):
                         _LOGGER.warning("Failed to get balance for %s: %s", iban, exc)
 
                     try:
-                        raw_transactions = bank.get_transactions(
-                            account,
-                            start_date=start_date,
-                            end_date=today,
-                            include_pending=True,
+                        booked, pending = self._fetch_and_split_transactions(
+                            bank, account, start_date, today
                         )
-                        booked, pending = self._split_transactions(raw_transactions)
                         account_data.booked_transactions = booked
                         account_data.pending_transactions = pending
+                        _LOGGER.debug(
+                            "Transactions for %s: %d booked, %d pending",
+                            iban, len(booked), len(pending),
+                        )
+                        if pending:
+                            for tx in pending:
+                                _LOGGER.debug(
+                                    "  Pending: %s %s %s — %s",
+                                    tx.get("date"), tx.get("amount"),
+                                    tx.get("currency"), tx.get("applicant_name") or tx.get("purpose"),
+                                )
                     except Exception as exc:  # noqa: BLE001
                         _LOGGER.warning(
                             "Failed to get transactions for %s: %s", iban, exc
@@ -228,22 +235,32 @@ class FinTsDataUpdateCoordinator(DataUpdateCoordinator[FinTsCoordinatorData]):
 
         return result
 
-    @staticmethod
-    def _split_transactions(
-        raw_transactions: list[Any],
+    def _fetch_and_split_transactions(
+        self,
+        bank: Any,
+        account: SEPAAccount,
+        start_date: date,
+        end_date: date,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Split raw transactions into booked and pending lists."""
-        booked: list[dict[str, Any]] = []
-        pending: list[dict[str, Any]] = []
+        """Fetch transactions and reliably split into booked vs pending.
 
-        for tx in raw_transactions:
-            serialized = _serialize_tx(tx)
-            d = tx.data if hasattr(tx, "data") else tx
-            # Heuristic: pending transactions often lack entry_date
-            if d.get("entry_date") is None:
-                pending.append(serialized)
-            else:
-                booked.append(serialized)
+        The fints MT940 path concatenates booked and pending data before
+        parsing, making them indistinguishable afterwards.  We work around
+        this by fetching twice: once without pending, once with.  The diff
+        gives us the pending-only transactions.
+        """
+        booked_raw = bank.get_transactions(
+            account, start_date, end_date, include_pending=False
+        )
+        booked = [_serialize_tx(tx) for tx in (booked_raw or [])]
+        booked_hashes = {_tx_hash(tx) for tx in booked}
+
+        all_raw = bank.get_transactions(
+            account, start_date, end_date, include_pending=True
+        )
+        all_serialized = [_serialize_tx(tx) for tx in (all_raw or [])]
+
+        pending = [tx for tx in all_serialized if _tx_hash(tx) not in booked_hashes]
 
         return booked, pending
 
