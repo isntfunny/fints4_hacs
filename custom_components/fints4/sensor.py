@@ -411,15 +411,26 @@ class FinTsUpcomingTransactionsSensor(CoordinatorEntity[FinTsDataUpdateCoordinat
     @property
     def native_value(self) -> Any | None:
         ad = self._account_data
-        if not ad:
+        if not ad or not ad.pending_transactions:
             return None
-        return len(ad.pending_transactions)
+        return round(sum(abs(tx.get("amount") or 0) for tx in ad.pending_transactions), 2)
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        ad = self._account_data
+        if ad and ad.pending_transactions:
+            return ad.pending_transactions[0].get("currency")
+        if ad and ad.balance and ad.balance.amount:
+            return ad.balance.amount.currency
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs = dict(self._base_attrs)
         ad = self._account_data
-        attrs["transactions"] = list(ad.pending_transactions) if ad else []
+        txs = ad.pending_transactions if ad else []
+        attrs["count"] = len(txs)
+        attrs["transactions"] = list(txs)
         return attrs
 
 
