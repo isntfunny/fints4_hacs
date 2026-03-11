@@ -16,7 +16,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -239,11 +239,12 @@ class FinTsBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEn
     ) -> None:
         super().__init__(coordinator)
         self._iban = account.iban
+        self._client_name = client.name
         ident = account_identifier(account, client.name)
         self._attr_unique_id = f"{entry.entry_id}_{ident}_balance"
         self._attr_name = f"{name} Balance"
         self._attr_device_info = get_account_device_info(entry, account, client.name)
-        self._attr_extra_state_attributes: dict[str, Any] = {
+        self._base_attrs: dict[str, Any] = {
             "account": account.iban,
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_BALANCE,
             "account_number": getattr(account, "accountnumber", None),
@@ -251,34 +252,43 @@ class FinTsBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEn
             "bic": getattr(account, "bic", None),
         }
         if client.name:
-            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+            self._base_attrs[ATTR_BANK] = client.name
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Update state from coordinator data."""
-        if not self.coordinator.data:
-            return
-        account_data = self.coordinator.data.accounts.get(self._iban)
-        if not account_data or not account_data.balance:
-            self._attr_available = False
-            self.async_write_ha_state()
-            return
+    @property
+    def _account_data(self) -> Any | None:
+        if self.coordinator.data:
+            return self.coordinator.data.accounts.get(self._iban)
+        return None
 
-        balance = account_data.balance
-        if (
-            balance.amount
-            and getattr(balance.amount, "amount", None) is not None
-        ):
-            self._attr_native_value = balance.amount.amount
-            self._attr_native_unit_of_measurement = balance.amount.currency
-            self._attr_extra_state_attributes["balance_date"] = (
-                str(balance.date) if balance.date else None
-            )
-            self._attr_available = True
-        else:
-            self._attr_available = False
+    @property
+    def available(self) -> bool:
+        ad = self._account_data
+        return bool(
+            ad and ad.balance and ad.balance.amount
+            and getattr(ad.balance.amount, "amount", None) is not None
+        )
 
-        self.async_write_ha_state()
+    @property
+    def native_value(self) -> Any | None:
+        ad = self._account_data
+        if ad and ad.balance and ad.balance.amount:
+            return ad.balance.amount.amount
+        return None
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        ad = self._account_data
+        if ad and ad.balance and ad.balance.amount:
+            return ad.balance.amount.currency
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = dict(self._base_attrs)
+        ad = self._account_data
+        if ad and ad.balance:
+            attrs["balance_date"] = str(ad.balance.date) if ad.balance.date else None
+        return attrs
 
 
 class FinTsAvailableBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
@@ -301,47 +311,65 @@ class FinTsAvailableBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator],
         self._attr_unique_id = f"{entry.entry_id}_{ident}_available_balance"
         self._attr_name = f"{name} Available Balance"
         self._attr_device_info = get_account_device_info(entry, account, client.name)
-        self._attr_extra_state_attributes: dict[str, Any] = {
+        self._base_attrs: dict[str, Any] = {
             "account": account.iban,
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_AVAILABLE_BALANCE,
         }
         if client.name:
-            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+            self._base_attrs[ATTR_BANK] = client.name
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Calculate balance - pending outgoing."""
-        if not self.coordinator.data:
-            return
-        account_data = self.coordinator.data.accounts.get(self._iban)
-        if not account_data or not account_data.balance:
-            self._attr_available = False
-            self.async_write_ha_state()
-            return
+    @property
+    def _account_data(self) -> Any | None:
+        if self.coordinator.data:
+            return self.coordinator.data.accounts.get(self._iban)
+        return None
 
-        balance = account_data.balance
-        if not (balance.amount and getattr(balance.amount, "amount", None) is not None):
-            self._attr_available = False
-            self.async_write_ha_state()
-            return
-
-        balance_amount = float(balance.amount.amount)
-        pending_outgoing_sum = 0.0
-        pending_outgoing_count = 0
-        for tx in account_data.pending_transactions:
+    def _pending_outgoing(self) -> tuple[float, int]:
+        ad = self._account_data
+        if not ad:
+            return 0.0, 0
+        total = 0.0
+        count = 0
+        for tx in ad.pending_transactions:
             if tx.get("direction") == "outgoing" and tx.get("amount") is not None:
-                pending_outgoing_sum += abs(tx["amount"])
-                pending_outgoing_count += 1
+                total += abs(tx["amount"])
+                count += 1
+        return total, count
 
-        self._attr_native_value = round(balance_amount - pending_outgoing_sum, 2)
-        self._attr_native_unit_of_measurement = balance.amount.currency
-        self._attr_extra_state_attributes["balance"] = balance_amount
-        self._attr_extra_state_attributes["pending_outgoing_sum"] = round(
-            pending_outgoing_sum, 2
+    @property
+    def available(self) -> bool:
+        ad = self._account_data
+        return bool(
+            ad and ad.balance and ad.balance.amount
+            and getattr(ad.balance.amount, "amount", None) is not None
         )
-        self._attr_extra_state_attributes["pending_outgoing_count"] = pending_outgoing_count
-        self._attr_available = True
-        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> Any | None:
+        ad = self._account_data
+        if not ad or not ad.balance or not ad.balance.amount:
+            return None
+        balance_amount = float(ad.balance.amount.amount)
+        pending_sum, _ = self._pending_outgoing()
+        return round(balance_amount - pending_sum, 2)
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        ad = self._account_data
+        if ad and ad.balance and ad.balance.amount:
+            return ad.balance.amount.currency
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = dict(self._base_attrs)
+        ad = self._account_data
+        if ad and ad.balance and ad.balance.amount:
+            attrs["balance"] = float(ad.balance.amount.amount)
+        pending_sum, pending_count = self._pending_outgoing()
+        attrs["pending_outgoing_sum"] = round(pending_sum, 2)
+        attrs["pending_outgoing_count"] = pending_count
+        return attrs
 
 
 class FinTsUpcomingTransactionsSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
@@ -363,32 +391,36 @@ class FinTsUpcomingTransactionsSensor(CoordinatorEntity[FinTsDataUpdateCoordinat
         self._attr_unique_id = f"{entry.entry_id}_{ident}_upcoming_transactions"
         self._attr_name = f"{name} Upcoming Transactions"
         self._attr_device_info = get_account_device_info(entry, account, client.name)
-        self._attr_extra_state_attributes: dict[str, Any] = {
+        self._base_attrs: dict[str, Any] = {
             "account": account.iban,
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_UPCOMING_TRANSACTIONS,
-            "transactions": [],
         }
         if client.name:
-            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+            self._base_attrs[ATTR_BANK] = client.name
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Update pending transactions list."""
-        if not self.coordinator.data:
-            return
-        account_data = self.coordinator.data.accounts.get(self._iban)
-        if not account_data:
-            self._attr_available = False
-            self.async_write_ha_state()
-            return
+    @property
+    def _account_data(self) -> Any | None:
+        if self.coordinator.data:
+            return self.coordinator.data.accounts.get(self._iban)
+        return None
 
-        pending = account_data.pending_transactions
-        self._attr_native_value = len(pending)
-        # pending entries are already plain dicts from _serialize_tx(); no
-        # further serialization needed — just shallow-copy the list.
-        self._attr_extra_state_attributes["transactions"] = list(pending)
-        self._attr_available = True
-        self.async_write_ha_state()
+    @property
+    def available(self) -> bool:
+        return self._account_data is not None
+
+    @property
+    def native_value(self) -> Any | None:
+        ad = self._account_data
+        if not ad:
+            return None
+        return len(ad.pending_transactions)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = dict(self._base_attrs)
+        ad = self._account_data
+        attrs["transactions"] = list(ad.pending_transactions) if ad else []
+        return attrs
 
 
 class FinTsHoldingsSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
@@ -410,8 +442,7 @@ class FinTsHoldingsSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorE
         self._attr_unique_id = f"{entry.entry_id}_{self._acc_nr}_holdings"
         self._attr_name = name
         self._attr_device_info = get_account_device_info(entry, account, client.name)
-        self._holdings_attributes: dict[str, Any] = {}
-        self._attr_extra_state_attributes: dict[str, Any] = {
+        self._base_attrs: dict[str, Any] = {
             "account": self._acc_nr,
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_HOLDINGS,
             "account_number": self._acc_nr,
@@ -419,49 +450,47 @@ class FinTsHoldingsSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorE
             "bic": getattr(account, "bic", None),
         }
         if client.name:
-            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+            self._base_attrs[ATTR_BANK] = client.name
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Update holdings from coordinator data."""
-        if not self.coordinator.data:
-            return
-        holdings = self.coordinator.data.holdings.get(self._acc_nr)
+    @property
+    def _holdings(self) -> list[Any] | None:
+        if self.coordinator.data:
+            return self.coordinator.data.holdings.get(self._acc_nr)
+        return None
+
+    @property
+    def available(self) -> bool:
+        return self._holdings is not None
+
+    @property
+    def native_value(self) -> Any | None:
+        holdings = self._holdings
         if holdings is None:
-            self._attr_available = False
-            self.async_write_ha_state()
-            return
-
+            return None
         total = sum(
             h.total_value
             for h in holdings
             if getattr(h, "total_value", None) is not None
         )
-        self._attr_native_value = total if total else 0
-        self._attr_available = True
-
-        # Build per-holding attributes
-        attrs: dict[str, Any] = {}
-        for holding in holdings:
-            if holding.name:
-                attrs[f"{holding.name} total"] = _serialize_attribute_value(
-                    getattr(holding, "total_value", None)
-                )
-                attrs[f"{holding.name} pieces"] = _serialize_attribute_value(
-                    getattr(holding, "pieces", None)
-                )
-                attrs[f"{holding.name} price"] = _serialize_attribute_value(
-                    getattr(holding, "market_value", None)
-                )
-        self._holdings_attributes = attrs
-        self.async_write_ha_state()
+        return total if total else 0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Additional attributes of the sensor."""
-        attributes = dict(self._attr_extra_state_attributes)
-        attributes.update(self._holdings_attributes)
-        return attributes
+        attrs = dict(self._base_attrs)
+        holdings = self._holdings
+        if holdings:
+            for holding in holdings:
+                if holding.name:
+                    attrs[f"{holding.name} total"] = _serialize_attribute_value(
+                        getattr(holding, "total_value", None)
+                    )
+                    attrs[f"{holding.name} pieces"] = _serialize_attribute_value(
+                        getattr(holding, "pieces", None)
+                    )
+                    attrs[f"{holding.name} price"] = _serialize_attribute_value(
+                        getattr(holding, "market_value", None)
+                    )
+        return attrs
 
 
 # ---------------------------------------------------------------------------
