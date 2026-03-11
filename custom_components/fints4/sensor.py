@@ -1,4 +1,4 @@
-"""Read the balance of your bank accounts via FinTS."""
+"""FinTS4 sensor entities: balance, holdings, available balance, upcoming transactions."""
 
 from __future__ import annotations
 
@@ -12,17 +12,22 @@ import voluptuous as vol
 from homeassistant.components.sensor import (
     PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
     SensorEntity,
+    SensorStateClass,
 )
-from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import CONF_NAME, CONF_PIN, CONF_URL, CONF_USERNAME
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .client import BankCredentials, FinTsClient
 from .const import (
+    ACCOUNT_TYPE_AVAILABLE_BALANCE,
+    ACCOUNT_TYPE_BALANCE,
+    ACCOUNT_TYPE_HOLDINGS,
+    ACCOUNT_TYPE_UPCOMING_TRANSACTIONS,
     ATTR_ACCOUNT_TYPE,
     ATTR_BANK,
     CONF_ACCOUNT,
@@ -32,13 +37,15 @@ from .const import (
     CONF_PRODUCT_ID,
     DOMAIN,
 )
+from .coordinator import (
+    FinTsDataUpdateCoordinator,
+    account_identifier,
+    get_account_device_info,
+)
 
 
 def _serialize_attribute_value(value: Any, depth: int = 0, max_depth: int = 10) -> Any:
-    """Serialize attribute values, converting non-JSON types to strings.
-
-    Includes recursion depth limit to prevent stack overflow on deeply nested structures.
-    """
+    """Serialize attribute values, converting non-JSON types to strings."""
     if depth > max_depth:
         return str(value)
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -55,23 +62,12 @@ def _serialize_attribute_value(value: Any, depth: int = 0, max_depth: int = 10) 
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(hours=4)
-
 ICON = "mdi:currency-eur"
 
-DEFAULT_CLIENT_NAME = "Unknown"
 
-
-def _get_device_info(client_name: str | None) -> DeviceInfo:
-    """Create device info for FinTS account entities."""
-    safe_name = client_name or DEFAULT_CLIENT_NAME
-    return DeviceInfo(
-        identifiers={(DOMAIN, safe_name)},
-        name=f"FinTS - {safe_name}",
-        manufacturer="FinTS",
-        model="Bank Account",
-    )
-
+# ---------------------------------------------------------------------------
+# Legacy YAML platform schema (kept for backwards compatibility)
+# ---------------------------------------------------------------------------
 
 ATTR_ACCOUNT = CONF_ACCOUNT
 
@@ -94,6 +90,8 @@ PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_HOLDINGS, default=[]): cv.ensure_list(SCHEMA_ACCOUNTS),
     }
 )
+
+SCAN_INTERVAL = timedelta(hours=4)
 
 
 def setup_platform(
@@ -122,59 +120,46 @@ def setup_platform(
 
     client = FinTsClient(credentials, fints_name, account_config, holdings_config)
     balance_accounts, holdings_accounts = client.detect_accounts()
-    accounts = _create_entities(
-        client,
-        fints_name,
-        account_config,
-        holdings_config,
-        balance_accounts,
-        holdings_accounts,
+    entities = _create_legacy_entities(
+        client, fints_name, account_config, holdings_config,
+        balance_accounts, holdings_accounts,
     )
-    add_entities(accounts, True)
+    add_entities(entities, True)
 
 
-def _create_entities(
+def _create_legacy_entities(
     client: FinTsClient,
     fints_name: str,
     account_config: dict[str, str | None],
     holdings_config: dict[str, str | None],
     balance_accounts: list[SEPAAccount],
     holdings_accounts: list[SEPAAccount],
-    config_entry: ConfigEntry | None = None,
 ) -> list[SensorEntity]:
-    """Return a list of entities for the given account lists."""
-
-    accounts: list[SensorEntity] = []
+    """Return legacy (non-coordinator) entities for YAML setup."""
+    entities: list[SensorEntity] = []
 
     for account in balance_accounts:
         if account_config and account.iban not in account_config:
-            _LOGGER.debug("Skipping account %s for bank %s", account.iban, fints_name)
             continue
-
         account_name = account_config.get(account.iban)
         if not account_name:
             account_name = account.accountnumber or account.iban or "FinTS balance"
-        accounts.append(FinTsAccount(client, account, account_name, config_entry))
-        _LOGGER.debug("Creating account %s for bank %s", account.iban, fints_name)
+        entities.append(FinTsLegacyAccount(client, account, account_name))
 
     for account in holdings_accounts:
         if holdings_config and account.accountnumber not in holdings_config:
-            _LOGGER.debug(
-                "Skipping holdings %s for bank %s", account.accountnumber, fints_name
-            )
             continue
-
         account_name = holdings_config.get(account.accountnumber)
         if not account_name:
             account_name = account.accountnumber or account.iban or "FinTS holdings"
-        accounts.append(
-            FinTsHoldingsAccount(client, account, account_name, config_entry)
-        )
-        _LOGGER.debug(
-            "Creating holdings %s for bank %s", account.accountnumber, fints_name
-        )
+        entities.append(FinTsLegacyHoldingsAccount(client, account, account_name))
 
-    return accounts
+    return entities
+
+
+# ---------------------------------------------------------------------------
+# Config entry setup — coordinator-based entities
+# ---------------------------------------------------------------------------
 
 
 async def async_setup_entry(
@@ -182,86 +167,334 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up FinTS sensors from a config entry.
-
-    The bank connection and account discovery are done in __init__.async_setup_entry
-    before this is called, so we only need to create the entities from the
-    already-fetched data stored in hass.data.
-    """
+    """Set up FinTS sensors from a config entry."""
     entry_data = hass.data[DOMAIN][entry.entry_id]
+    coordinator: FinTsDataUpdateCoordinator = entry_data["coordinator"]
+    client: FinTsClient = entry_data["client"]
+    fints_name: str = entry_data["fints_name"]
+    account_config: dict[str, str | None] = entry_data["account_config"]
+    holdings_config: dict[str, str | None] = entry_data["holdings_config"]
+    balance_accounts: list[SEPAAccount] = entry_data["balance_accounts"]
+    holdings_accounts: list[SEPAAccount] = entry_data["holdings_accounts"]
 
-    accounts = _create_entities(
-        entry_data["client"],
-        entry_data["fints_name"],
-        entry_data["account_config"],
-        entry_data["holdings_config"],
-        entry_data["balance_accounts"],
-        entry_data["holdings_accounts"],
-        config_entry=entry,
-    )
+    entities: list[SensorEntity] = []
 
-    async_add_entities(accounts, True)
+    for account in balance_accounts:
+        iban = account.iban
+        if account_config and iban not in account_config:
+            _LOGGER.debug("Skipping account %s for bank %s", iban, fints_name)
+            continue
+
+        account_name = account_config.get(iban)
+        if not account_name:
+            account_name = account.accountnumber or iban or "FinTS balance"
+
+        entities.append(
+            FinTsBalanceSensor(coordinator, entry, client, account, account_name)
+        )
+        entities.append(
+            FinTsAvailableBalanceSensor(coordinator, entry, client, account, account_name)
+        )
+        entities.append(
+            FinTsUpcomingTransactionsSensor(coordinator, entry, client, account, account_name)
+        )
+        _LOGGER.debug("Creating sensors for account %s (bank %s)", iban, fints_name)
+
+    for account in holdings_accounts:
+        acc_nr = account.accountnumber
+        if holdings_config and acc_nr not in holdings_config:
+            _LOGGER.debug("Skipping holdings %s for bank %s", acc_nr, fints_name)
+            continue
+
+        account_name = holdings_config.get(acc_nr)
+        if not account_name:
+            account_name = acc_nr or account.iban or "FinTS holdings"
+
+        entities.append(
+            FinTsHoldingsSensor(coordinator, entry, client, account, account_name)
+        )
+        _LOGGER.debug("Creating holdings sensor for %s (bank %s)", acc_nr, fints_name)
+
+    async_add_entities(entities)
 
 
-class FinTsAccount(SensorEntity):
-    """Sensor for a FinTS balance account."""
+# ---------------------------------------------------------------------------
+# Coordinator-based entities
+# ---------------------------------------------------------------------------
+
+
+class FinTsBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
+    """Sensor for a FinTS balance account — reads from coordinator data."""
+
+    _attr_icon = ICON
+    _attr_state_class = SensorStateClass.TOTAL
+
+    def __init__(
+        self,
+        coordinator: FinTsDataUpdateCoordinator,
+        entry: ConfigEntry,
+        client: FinTsClient,
+        account: SEPAAccount,
+        name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._iban = account.iban
+        ident = account_identifier(account, client.name)
+        self._attr_unique_id = f"{entry.entry_id}_{ident}_balance"
+        self._attr_name = f"{name} Balance"
+        self._attr_device_info = get_account_device_info(entry, account, client.name)
+        self._attr_extra_state_attributes: dict[str, Any] = {
+            "account": account.iban,
+            ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_BALANCE,
+            "account_number": getattr(account, "accountnumber", None),
+            "iban": account.iban,
+            "bic": getattr(account, "bic", None),
+        }
+        if client.name:
+            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update state from coordinator data."""
+        if not self.coordinator.data:
+            return
+        account_data = self.coordinator.data.accounts.get(self._iban)
+        if not account_data or not account_data.balance:
+            self._attr_available = False
+            self.async_write_ha_state()
+            return
+
+        balance = account_data.balance
+        if (
+            balance.amount
+            and getattr(balance.amount, "amount", None) is not None
+        ):
+            self._attr_native_value = balance.amount.amount
+            self._attr_native_unit_of_measurement = balance.amount.currency
+            self._attr_extra_state_attributes["balance_date"] = (
+                str(balance.date) if balance.date else None
+            )
+            self._attr_available = True
+        else:
+            self._attr_available = False
+
+        self.async_write_ha_state()
+
+
+class FinTsAvailableBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
+    """Sensor showing balance minus pending outgoing transactions."""
+
+    _attr_icon = "mdi:cash-minus"
+    _attr_state_class = SensorStateClass.TOTAL
+
+    def __init__(
+        self,
+        coordinator: FinTsDataUpdateCoordinator,
+        entry: ConfigEntry,
+        client: FinTsClient,
+        account: SEPAAccount,
+        name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._iban = account.iban
+        ident = account_identifier(account, client.name)
+        self._attr_unique_id = f"{entry.entry_id}_{ident}_available_balance"
+        self._attr_name = f"{name} Available Balance"
+        self._attr_device_info = get_account_device_info(entry, account, client.name)
+        self._attr_extra_state_attributes: dict[str, Any] = {
+            "account": account.iban,
+            ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_AVAILABLE_BALANCE,
+        }
+        if client.name:
+            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Calculate balance - pending outgoing."""
+        if not self.coordinator.data:
+            return
+        account_data = self.coordinator.data.accounts.get(self._iban)
+        if not account_data or not account_data.balance:
+            self._attr_available = False
+            self.async_write_ha_state()
+            return
+
+        balance = account_data.balance
+        if not (balance.amount and getattr(balance.amount, "amount", None) is not None):
+            self._attr_available = False
+            self.async_write_ha_state()
+            return
+
+        balance_amount = float(balance.amount.amount)
+        pending_outgoing_sum = 0.0
+        pending_outgoing_count = 0
+        for tx in account_data.pending_transactions:
+            if tx.get("direction") == "outgoing" and tx.get("amount") is not None:
+                pending_outgoing_sum += abs(tx["amount"])
+                pending_outgoing_count += 1
+
+        self._attr_native_value = round(balance_amount - pending_outgoing_sum, 2)
+        self._attr_native_unit_of_measurement = balance.amount.currency
+        self._attr_extra_state_attributes["balance"] = balance_amount
+        self._attr_extra_state_attributes["pending_outgoing_sum"] = round(
+            pending_outgoing_sum, 2
+        )
+        self._attr_extra_state_attributes["pending_outgoing_count"] = pending_outgoing_count
+        self._attr_available = True
+        self.async_write_ha_state()
+
+
+class FinTsUpcomingTransactionsSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
+    """Sensor showing pending/upcoming transactions."""
+
+    _attr_icon = "mdi:clock-outline"
+
+    def __init__(
+        self,
+        coordinator: FinTsDataUpdateCoordinator,
+        entry: ConfigEntry,
+        client: FinTsClient,
+        account: SEPAAccount,
+        name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._iban = account.iban
+        ident = account_identifier(account, client.name)
+        self._attr_unique_id = f"{entry.entry_id}_{ident}_upcoming_transactions"
+        self._attr_name = f"{name} Upcoming Transactions"
+        self._attr_device_info = get_account_device_info(entry, account, client.name)
+        self._attr_extra_state_attributes: dict[str, Any] = {
+            "account": account.iban,
+            ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_UPCOMING_TRANSACTIONS,
+            "transactions": [],
+        }
+        if client.name:
+            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update pending transactions list."""
+        if not self.coordinator.data:
+            return
+        account_data = self.coordinator.data.accounts.get(self._iban)
+        if not account_data:
+            self._attr_available = False
+            self.async_write_ha_state()
+            return
+
+        pending = account_data.pending_transactions
+        self._attr_native_value = len(pending)
+        # pending entries are already plain dicts from _serialize_tx(); no
+        # further serialization needed — just shallow-copy the list.
+        self._attr_extra_state_attributes["transactions"] = list(pending)
+        self._attr_available = True
+        self.async_write_ha_state()
+
+
+class FinTsHoldingsSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEntity):
+    """Sensor for a FinTS holdings account — reads from coordinator data."""
+
+    _attr_icon = ICON
+    _attr_native_unit_of_measurement = "EUR"
+
+    def __init__(
+        self,
+        coordinator: FinTsDataUpdateCoordinator,
+        entry: ConfigEntry,
+        client: FinTsClient,
+        account: SEPAAccount,
+        name: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._acc_nr = getattr(account, "accountnumber", None) or ""
+        self._attr_unique_id = f"{entry.entry_id}_{self._acc_nr}_holdings"
+        self._attr_name = name
+        self._attr_device_info = get_account_device_info(entry, account, client.name)
+        self._holdings_attributes: dict[str, Any] = {}
+        self._attr_extra_state_attributes: dict[str, Any] = {
+            "account": self._acc_nr,
+            ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_HOLDINGS,
+            "account_number": self._acc_nr,
+            "iban": getattr(account, "iban", None),
+            "bic": getattr(account, "bic", None),
+        }
+        if client.name:
+            self._attr_extra_state_attributes[ATTR_BANK] = client.name
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update holdings from coordinator data."""
+        if not self.coordinator.data:
+            return
+        holdings = self.coordinator.data.holdings.get(self._acc_nr)
+        if holdings is None:
+            self._attr_available = False
+            self.async_write_ha_state()
+            return
+
+        total = sum(
+            h.total_value
+            for h in holdings
+            if getattr(h, "total_value", None) is not None
+        )
+        self._attr_native_value = total if total else 0
+        self._attr_available = True
+
+        # Build per-holding attributes
+        attrs: dict[str, Any] = {}
+        for holding in holdings:
+            if holding.name:
+                attrs[f"{holding.name} total"] = _serialize_attribute_value(
+                    getattr(holding, "total_value", None)
+                )
+                attrs[f"{holding.name} pieces"] = _serialize_attribute_value(
+                    getattr(holding, "pieces", None)
+                )
+                attrs[f"{holding.name} price"] = _serialize_attribute_value(
+                    getattr(holding, "market_value", None)
+                )
+        self._holdings_attributes = attrs
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Additional attributes of the sensor."""
+        attributes = dict(self._attr_extra_state_attributes)
+        attributes.update(self._holdings_attributes)
+        return attributes
+
+
+# ---------------------------------------------------------------------------
+# Legacy (YAML-only) entities — sync update(), no coordinator
+# ---------------------------------------------------------------------------
+
+
+class FinTsLegacyAccount(SensorEntity):
+    """Legacy sensor for a FinTS balance account (YAML setup)."""
 
     def __init__(
         self,
         client: FinTsClient,
         account: SEPAAccount,
         name: str,
-        config_entry: ConfigEntry | None = None,
     ) -> None:
         self._client = client
         self._account = account
         self._balance = None
-        self._config_entry = config_entry
-        account_identifier = (
+        account_ident = (
             getattr(account, "iban", None)
             or getattr(account, "accountnumber", None)
             or self._client.name
         )
-        unique_id = f"{self._client.name}_{account_identifier}_balance"
-        if self._config_entry:
-            unique_id = f"{self._config_entry.entry_id}_{unique_id}"
-        self._attr_unique_id = unique_id
+        self._attr_unique_id = f"{self._client.name}_{account_ident}_balance"
         self._attr_name = name
         self._attr_icon = ICON
         self._attr_extra_state_attributes = {
-            ATTR_ACCOUNT: self._account.iban,
-            ATTR_ACCOUNT_TYPE: "balance",
+            "account": self._account.iban,
+            ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_BALANCE,
         }
         if self._client.name:
             self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
-        self._update_account_attributes()
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return _get_device_info(self._client.name)
-
-    def _update_account_attributes(self) -> None:
-        self._attr_extra_state_attributes["account_number"] = getattr(
-            self._account, "accountnumber", None
-        )
-        self._attr_extra_state_attributes["iban"] = getattr(self._account, "iban", None)
-        self._attr_extra_state_attributes["bic"] = getattr(self._account, "bic", None)
-        self._attr_extra_state_attributes["subaccount_number"] = getattr(
-            self._account, "subaccountnumber", None
-        )
-        self._attr_extra_state_attributes["currency"] = _serialize_attribute_value(
-            getattr(self._account, "currency", None)
-        )
-        account_info = None
-        if getattr(self._account, "iban", None):
-            account_info = self._client.get_account_information(self._account.iban)
-        if account_info:
-            for key, value in account_info.items():
-                if value is None:
-                    continue
-                self._attr_extra_state_attributes.setdefault(
-                    key, _serialize_attribute_value(value)
-                )
 
     def update(self) -> None:
         """Get the current balance and currency for the account."""
@@ -270,14 +503,8 @@ class FinTsAccount(SensorEntity):
             with bank:
                 self._balance = bank.get_balance(self._account)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error(
-                "Error updating balance for %s: %s – re-authentication may be needed",
-                self.name,
-                err,
-            )
+            _LOGGER.error("Error updating balance for %s: %s", self.name, err)
             self._attr_available = False
-            if self._config_entry is not None:
-                self._config_entry.async_start_reauth(self.hass)
             return
 
         self._attr_available = True
@@ -292,54 +519,35 @@ class FinTsAccount(SensorEntity):
                 str(self._balance.date) if self._balance.date else None
             )
         else:
-            _LOGGER.warning(
-                "Balance for %s has no amount/currency - skipping this account",
-                self.name,
-            )
             self._attr_available = False
-        _LOGGER.debug("updated balance of account %s", self.name)
 
 
-class FinTsHoldingsAccount(SensorEntity):
-    """Sensor for a FinTS holdings account."""
+class FinTsLegacyHoldingsAccount(SensorEntity):
+    """Legacy sensor for a FinTS holdings account (YAML setup)."""
 
     def __init__(
         self,
         client: FinTsClient,
         account: SEPAAccount,
         name: str,
-        config_entry: ConfigEntry | None = None,
     ) -> None:
         self._client = client
         self._attr_name = name
         self._account = account
         self._holdings: list[Any] = []
         self._holdings_attributes: dict[str, Any] = {}
-        self._config_entry = config_entry
-        account_identifier = (
+        account_ident = (
             getattr(account, "accountnumber", None) or self._client.name
         )
-        unique_id = f"{self._client.name}_{account_identifier}_holdings"
-        if self._config_entry:
-            unique_id = f"{self._config_entry.entry_id}_{unique_id}"
-        self._attr_unique_id = unique_id
+        self._attr_unique_id = f"{self._client.name}_{account_ident}_holdings"
         self._attr_icon = ICON
         self._attr_native_unit_of_measurement = "EUR"
         self._attr_extra_state_attributes = {
-            ATTR_ACCOUNT: getattr(account, "accountnumber", None),
-            ATTR_ACCOUNT_TYPE: "holdings",
+            "account": getattr(account, "accountnumber", None),
+            ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_HOLDINGS,
         }
         if self._client.name:
             self._attr_extra_state_attributes[ATTR_BANK] = self._client.name
-        self._attr_extra_state_attributes["account_number"] = getattr(
-            account, "accountnumber", None
-        )
-        self._attr_extra_state_attributes["iban"] = getattr(account, "iban", None)
-        self._attr_extra_state_attributes["bic"] = getattr(account, "bic", None)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return _get_device_info(self._client.name)
 
     def update(self) -> None:
         """Get the current holdings for the account."""
@@ -348,14 +556,8 @@ class FinTsHoldingsAccount(SensorEntity):
             with bank:
                 self._holdings = bank.get_holdings(self._account)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error(
-                "Error updating holdings for %s: %s – re-authentication may be needed",
-                self.name,
-                err,
-            )
+            _LOGGER.error("Error updating holdings for %s: %s", self.name, err)
             self._attr_available = False
-            if self._config_entry is not None:
-                self._config_entry.async_start_reauth(self.hass)
             return
 
         self._attr_available = True
@@ -365,10 +567,7 @@ class FinTsHoldingsAccount(SensorEntity):
             if getattr(h, "total_value", None) is not None
         )
         self._attr_native_value = total if total else 0
-        self._build_holding_attributes()
 
-    def _build_holding_attributes(self) -> None:
-        """Build holding attributes from current holdings data."""
         attrs: dict[str, Any] = {}
         for holding in self._holdings:
             if holding.name:

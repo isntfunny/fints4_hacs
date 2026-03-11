@@ -8,6 +8,6 @@
   "loggers": ["fints", "mt_940", "sepaxml"],
   "quality_scale": "legacy",
   "config_flow": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "requirements": ["fints>=4.0.0"]
 }

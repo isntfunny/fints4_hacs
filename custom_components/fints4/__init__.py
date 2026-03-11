@@ -10,11 +10,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .client import BankCredentials, FinTsClient
-from .const import CONF_ACCOUNT, CONF_ACCOUNTS, CONF_BIN, CONF_HOLDINGS, CONF_PRODUCT_ID, DOMAIN
+from .const import (
+    CONF_ACCOUNT,
+    CONF_ACCOUNTS,
+    CONF_BIN,
+    CONF_HOLDINGS,
+    CONF_PRODUCT_ID,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+)
+from .coordinator import FinTsDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.EVENT]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -25,10 +34,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up FinTS4 from a config entry.
 
-    The bank connection (detect_accounts) is established here – before
-    async_forward_entry_setups – so that ConfigEntryAuthFailed is raised at
-    the right time and HA can immediately show the re-auth notification
-    instead of propagating the exception through the sensor platform.
+    Creates a single DataUpdateCoordinator that fetches balance, transactions,
+    and holdings in one FinTS dialog per poll cycle.
     """
     hass.data.setdefault(DOMAIN, {})
 
@@ -61,8 +68,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:  # noqa: BLE001
         err_str = str(err)
         _LOGGER.error("FinTS connection failed for %s: %s", fints_name, err_str)
-        # Treat failures as auth errors so HA shows the re-auth notification.
-        # This covers expired system_id (60-day pushTAN renewal) and wrong PIN.
         raise ConfigEntryAuthFailed(err_str) from err
 
     # Persist a refreshed system_id when the bank issues a new one
@@ -73,14 +78,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data={**entry.data, "system_id": new_system_id},
         )
 
-    # Share the authenticated client + account lists with platform setup
+    # Create the coordinator — single polling loop for all entities
+    coordinator = FinTsDataUpdateCoordinator(
+        hass,
+        client,
+        balance_accounts,
+        holdings_accounts,
+        update_interval_minutes=DEFAULT_UPDATE_INTERVAL,
+    )
+    coordinator.config_entry = entry
+
+    await coordinator.async_config_entry_first_refresh()
+
     hass.data[DOMAIN][entry.entry_id] = {
+        "coordinator": coordinator,
         "client": client,
-        "balance_accounts": balance_accounts,
-        "holdings_accounts": holdings_accounts,
         "fints_name": fints_name,
         "account_config": account_config,
         "holdings_config": holdings_config,
+        "balance_accounts": balance_accounts,
+        "holdings_accounts": holdings_accounts,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
