@@ -278,9 +278,23 @@ class FinTSConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if result[0] == "need_tan":
             _, self._raw_client, self._tan_request, self._dialog_data = result
             self._tan_challenge = getattr(self._tan_request, "challenge", "") or ""
-            self._tan_decoupled = bool(
-                getattr(self._tan_request, "decoupled", False)
-            )
+            # Detect decoupled (pushTAN). The fints library only sets
+            # NeedTANResponse.decoupled when the bank returns code 3955;
+            # other banks (e.g. Sparkasse with code 0030) leave it False
+            # even though the active TAN mechanism is decoupled. Fall back
+            # to checking the active TAN method's decoupled_max_poll_number.
+            decoupled = bool(getattr(self._tan_request, "decoupled", False))
+            if not decoupled:
+                try:
+                    mechs = self._raw_client.get_tan_mechanisms()
+                    current = self._raw_client.get_current_tan_mechanism()
+                    param = mechs.get(current) if mechs else None
+                    poll = getattr(param, "decoupled_max_poll_number", None)
+                    if poll and int(poll) > 0:
+                        decoupled = True
+                except Exception:  # noqa: BLE001
+                    pass
+            self._tan_decoupled = decoupled
             _LOGGER.info(
                 "TAN required (decoupled=%s). Challenge: %s",
                 self._tan_decoupled,
