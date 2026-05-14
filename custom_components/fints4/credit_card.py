@@ -66,7 +66,7 @@ def _serialize_credit_card_tx(raw_tx: Any, account_key: str) -> dict[str, Any] |
     if isinstance(raw_tx, bytes):
         raw_tx = raw_tx.decode("iso-8859-1")
 
-    parts = str(raw_tx).split(":")
+    parts = list(raw_tx) if isinstance(raw_tx, list | tuple) else str(raw_tx).split(":")
     if len(parts) < 11:
         _LOGGER.debug("Skipping malformed credit card transaction: %s", raw_tx)
         return None
@@ -81,7 +81,9 @@ def _serialize_credit_card_tx(raw_tx: Any, account_key: str) -> dict[str, Any] |
 
     purpose = ""
     for part in parts[11:21]:
-        text = part.strip()
+        if part is None:
+            continue
+        text = str(part).strip()
         if text == "J":
             break
         purpose += text
@@ -113,7 +115,7 @@ def _serialize_credit_card_tx(raw_tx: Any, account_key: str) -> dict[str, Any] |
                 str(transaction_date or ""),
                 str(value_date or ""),
                 str(amount),
-                parts[9],
+                str(parts[9] or ""),
                 purpose,
             ]
         ),
