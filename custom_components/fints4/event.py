@@ -55,9 +55,10 @@ async def async_setup_entry(
         entities.append(
             FinTsNewTransactionEvent(coordinator, entry, client, account, account_name)
         )
-        entities.append(
-            FinTsNewPendingTransactionEvent(coordinator, entry, client, account, account_name)
-        )
+        if not client.is_credit_card_account(account):
+            entities.append(
+                FinTsNewPendingTransactionEvent(coordinator, entry, client, account, account_name)
+            )
 
     async_add_entities(entities)
 

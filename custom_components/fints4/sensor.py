@@ -189,16 +189,18 @@ async def async_setup_entry(
 
         account_name = account_config_name(account, account_config, client.name)
         account_name = account_name or account_display_name(account, "FinTS balance")
+        is_credit_card = client.is_credit_card_account(account)
 
         entities.append(
             FinTsBalanceSensor(coordinator, entry, client, account, account_name)
         )
-        entities.append(
-            FinTsAvailableBalanceSensor(coordinator, entry, client, account, account_name)
-        )
-        entities.append(
-            FinTsUpcomingTransactionsSensor(coordinator, entry, client, account, account_name)
-        )
+        if not is_credit_card:
+            entities.append(
+                FinTsAvailableBalanceSensor(coordinator, entry, client, account, account_name)
+            )
+            entities.append(
+                FinTsUpcomingTransactionsSensor(coordinator, entry, client, account, account_name)
+            )
         _LOGGER.debug("Creating sensors for account %s (bank %s)", ident, fints_name)
 
     for account in holdings_accounts:
