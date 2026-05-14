@@ -142,26 +142,25 @@ def _balance_from_credit_card_segment(segment: Any) -> FinTsBalance | None:
     if not balance_data or len(balance_data) < 3:
         return None
 
-    amount_data = _as_sequence(balance_data[1])
-    if not amount_data or len(amount_data) < 2:
-        return None
-
-    amount = _parse_german_float(amount_data[0])
+    amount = _parse_german_float(balance_data[1])
     if amount is None:
         return None
     if balance_data[0] == "D":
         amount *= -1
 
-    balance_date = _parse_fints_date(balance_data[2])
-    if len(balance_data) > 3 and balance_data[3]:
-        balance_time = _parse_fints_time(balance_data[3])
+    balance_currency = str(balance_data[2])
+    balance_date = _parse_fints_date(
+        balance_data[3] if len(balance_data) > 3 else None
+    )
+    if len(balance_data) > 4 and balance_data[4]:
+        balance_time = _parse_fints_time(balance_data[4])
         if balance_date and balance_time:
             return FinTsBalance(
-                FinTsAmount(amount, amount_data[1]),
+                FinTsAmount(amount, balance_currency),
                 datetime.combine(balance_date, balance_time),
             )
 
-    return FinTsBalance(FinTsAmount(amount, amount_data[1]), balance_date)
+    return FinTsBalance(FinTsAmount(amount, balance_currency), balance_date)
 
 
 def serialize_credit_card_response(
