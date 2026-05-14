@@ -10,6 +10,17 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 
+def _as_sequence(value: Any) -> list[Any] | None:
+    """Return FinTS parser lists/ValueLists as a plain list."""
+    if isinstance(value, bytes):
+        value = value.decode("iso-8859-1")
+    if isinstance(value, str):
+        return value.split(":")
+    if hasattr(value, "__iter__"):
+        return list(value)
+    return None
+
+
 @dataclass
 class FinTsAmount:
     """Small balance amount object compatible with mt940 balance objects."""
@@ -63,11 +74,8 @@ def _parse_fints_time(value: Any) -> time | None:
 
 def _serialize_credit_card_tx(raw_tx: Any, account_key: str) -> dict[str, Any] | None:
     """Serialize one DKKKU credit-card transaction line from DIKKU."""
-    if isinstance(raw_tx, bytes):
-        raw_tx = raw_tx.decode("iso-8859-1")
-
-    parts = list(raw_tx) if isinstance(raw_tx, list | tuple) else str(raw_tx).split(":")
-    if len(parts) < 11:
+    parts = _as_sequence(raw_tx)
+    if not parts or len(parts) < 11:
         _LOGGER.debug("Skipping malformed credit card transaction: %s", raw_tx)
         return None
 
@@ -130,12 +138,12 @@ def _balance_from_credit_card_segment(segment: Any) -> FinTsBalance | None:
     if len(data) < 3:
         return None
 
-    balance_data = data[2]
-    if not isinstance(balance_data, list | tuple) or len(balance_data) < 3:
+    balance_data = _as_sequence(data[2])
+    if not balance_data or len(balance_data) < 3:
         return None
 
-    amount_data = balance_data[1]
-    if not isinstance(amount_data, list | tuple) or len(amount_data) < 2:
+    amount_data = _as_sequence(balance_data[1])
+    if not amount_data or len(amount_data) < 2:
         return None
 
     amount = _parse_german_float(amount_data[0])
