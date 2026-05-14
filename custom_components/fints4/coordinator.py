@@ -86,8 +86,8 @@ def account_identifier(account: SEPAAccount, client_name: str) -> str:
 def account_keys(account: SEPAAccount, client_name: str) -> tuple[str, ...]:
     """Return stable lookup keys for account config and coordinator data."""
     keys = (
-        getattr(account, "accountnumber", None),
         getattr(account, "iban", None),
+        getattr(account, "accountnumber", None),
         client_name,
     )
     return tuple(dict.fromkeys(str(key) for key in keys if key))

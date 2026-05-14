@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from fints.client import FinTS3PinTanClient, FinTSOperations
+from fints.formals import BankIdentifier
 from fints.models import SEPAAccount
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,12 +122,39 @@ class FinTsClient:
     ) -> dict[str, Any] | None:
         """Get cached account information by IBAN or account number."""
         for key in (
-            getattr(account, "accountnumber", None),
             getattr(account, "iban", None),
+            getattr(account, "accountnumber", None),
         ):
             if key and (info := self._account_information.get(key)):
                 return info
         return None
+
+    def _account_from_information(
+        self, account_information: dict[str, Any]
+    ) -> SEPAAccount | None:
+        account_number = account_information.get("account_number")
+        if not account_number:
+            return None
+
+        bank_identifier = account_information.get("bank_identifier")
+        country_code = "DE"
+        bank_code = self._credentials.blz
+        if bank_identifier:
+            country_identifier = getattr(bank_identifier, "country_identifier", None)
+            if country_identifier:
+                country_code = BankIdentifier.COUNTRY_NUMERIC_TO_ALPHA.get(
+                    country_identifier,
+                    country_code,
+                )
+            bank_code = getattr(bank_identifier, "bank_code", None) or bank_code
+
+        return SEPAAccount(
+            account_information.get("iban"),
+            f"XXXX{country_code}XX",
+            account_number,
+            account_information.get("subaccount_number"),
+            bank_code,
+        )
 
     @staticmethod
     def _supports_operation(
@@ -232,6 +260,33 @@ class FinTsClient:
                     self._account_information_fetched = True
                 except Exception as exc:  # noqa: BLE001
                     _LOGGER.warning("Could not fetch account information: %s", exc)
+
+        seen_accounts = {
+            key
+            for account in sepa_accounts
+            for key in (
+                getattr(account, "iban", None),
+                getattr(account, "accountnumber", None),
+            )
+            if key
+        }
+        for account_information in self._account_information.values():
+            if not self._supports_operation(
+                account_information,
+                FinTSOperations.GET_CREDIT_CARD_TRANSACTIONS,
+            ):
+                continue
+            account = self._account_from_information(account_information)
+            if not account:
+                continue
+            account_keys = (
+                getattr(account, "iban", None),
+                getattr(account, "accountnumber", None),
+            )
+            if any(key in seen_accounts for key in account_keys if key):
+                continue
+            sepa_accounts.append(account)
+            seen_accounts.update(key for key in account_keys if key)
 
         for account in sepa_accounts:
             if self.is_balance_account(account):
