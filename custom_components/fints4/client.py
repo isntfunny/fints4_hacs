@@ -6,7 +6,7 @@ from collections import namedtuple
 import logging
 from typing import Any
 
-from fints.client import FinTS3PinTanClient
+from fints.client import FinTS3PinTanClient, FinTSOperations
 from fints.models import SEPAAccount
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def auto_bootstrap(client: FinTS3PinTanClient, preferred_tan_code: str = PREFERR
     if client.selected_tan_medium is None and client.is_tan_media_required():
         try:
             media_result = client.get_tan_media()
-            media_list = media_result[1] if len(media_result) > 1 else []
+            media_list = media_result[1] if media_result and len(media_result) > 1 else []
             if media_list:
                 client.set_tan_medium(media_list[0])
                 _LOGGER.info("Auto-selected TAN medium: %s", media_list[0])
@@ -116,12 +116,49 @@ class FinTsClient:
         """Get account information for an IBAN, if available (uses cached data)."""
         return self._account_information.get(iban)
 
+    def get_account_information_for_account(
+        self, account: SEPAAccount
+    ) -> dict[str, Any] | None:
+        """Get cached account information by IBAN or account number."""
+        for key in (
+            getattr(account, "accountnumber", None),
+            getattr(account, "iban", None),
+        ):
+            if key and (info := self._account_information.get(key)):
+                return info
+        return None
+
+    @staticmethod
+    def _supports_operation(
+        account_information: dict[str, Any] | None,
+        operation: FinTSOperations,
+    ) -> bool:
+        if not account_information:
+            return False
+
+        supported_operations = account_information.get("supported_operations") or {}
+        for key, supported in supported_operations.items():
+            if key == operation or getattr(key, "name", None) == operation.name:
+                return bool(supported)
+        return False
+
+    def is_credit_card_account(self, account: SEPAAccount) -> bool:
+        """Return True when the account supports credit card statements."""
+        account_information = self.get_account_information_for_account(account)
+        return self._supports_operation(
+            account_information,
+            FinTSOperations.GET_CREDIT_CARD_TRANSACTIONS,
+        )
+
     def is_balance_account(self, account: SEPAAccount) -> bool:
         """Determine if the given account is of type balance account."""
+        if self.is_credit_card_account(account):
+            return True
+
         if not account.iban:
             return False
 
-        account_information = self.get_account_information(account.iban)
+        account_information = self.get_account_information_for_account(account)
         if not account_information:
             # get_information() failed or account not yet indexed.
             # Fall back: include when no explicit account filter is configured.
@@ -186,11 +223,12 @@ class FinTsClient:
             if not self._account_information_fetched:
                 try:
                     info = self.client.get_information()
-                    self._account_information = {
-                        account["iban"]: account
-                        for account in info.get("accounts", [])
-                        if account.get("iban")
-                    }
+                    self._account_information = {}
+                    for account_info in info.get("accounts", []):
+                        if iban := account_info.get("iban"):
+                            self._account_information[iban] = account_info
+                        if account_number := account_info.get("account_number"):
+                            self._account_information[account_number] = account_info
                     self._account_information_fetched = True
                 except Exception as exc:  # noqa: BLE001
                     _LOGGER.warning("Could not fetch account information: %s", exc)

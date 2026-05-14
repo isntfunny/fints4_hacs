@@ -39,7 +39,10 @@ from .const import (
 )
 from .coordinator import (
     FinTsDataUpdateCoordinator,
+    account_config_name,
+    account_display_name,
     account_identifier,
+    account_is_configured,
     get_account_device_info,
 )
 
@@ -139,11 +142,10 @@ def _create_legacy_entities(
     entities: list[SensorEntity] = []
 
     for account in balance_accounts:
-        if account_config and account.iban not in account_config:
+        if not account_is_configured(account, account_config, client.name):
             continue
-        account_name = account_config.get(account.iban)
-        if not account_name:
-            account_name = account.accountnumber or account.iban or "FinTS balance"
+        account_name = account_config_name(account, account_config, client.name)
+        account_name = account_name or account_display_name(account, "FinTS balance")
         entities.append(FinTsLegacyAccount(client, account, account_name))
 
     for account in holdings_accounts:
@@ -180,14 +182,13 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
 
     for account in balance_accounts:
-        iban = account.iban
-        if account_config and iban not in account_config:
-            _LOGGER.debug("Skipping account %s for bank %s", iban, fints_name)
+        ident = account_identifier(account, client.name)
+        if not account_is_configured(account, account_config, client.name):
+            _LOGGER.debug("Skipping account %s for bank %s", ident, fints_name)
             continue
 
-        account_name = account_config.get(iban)
-        if not account_name:
-            account_name = account.accountnumber or iban or "FinTS balance"
+        account_name = account_config_name(account, account_config, client.name)
+        account_name = account_name or account_display_name(account, "FinTS balance")
 
         entities.append(
             FinTsBalanceSensor(coordinator, entry, client, account, account_name)
@@ -198,7 +199,7 @@ async def async_setup_entry(
         entities.append(
             FinTsUpcomingTransactionsSensor(coordinator, entry, client, account, account_name)
         )
-        _LOGGER.debug("Creating sensors for account %s (bank %s)", iban, fints_name)
+        _LOGGER.debug("Creating sensors for account %s (bank %s)", ident, fints_name)
 
     for account in holdings_accounts:
         acc_nr = account.accountnumber
@@ -238,14 +239,14 @@ class FinTsBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEn
         name: str,
     ) -> None:
         super().__init__(coordinator)
-        self._iban = account.iban
+        self._account_key = account_identifier(account, client.name)
         self._client_name = client.name
         ident = account_identifier(account, client.name)
         self._attr_unique_id = f"{entry.entry_id}_{ident}_balance"
         self._attr_name = f"{name} Balance"
         self._attr_device_info = get_account_device_info(entry, account, client.name)
         self._base_attrs: dict[str, Any] = {
-            "account": account.iban,
+            "account": account.iban or getattr(account, "accountnumber", None),
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_BALANCE,
             "account_number": getattr(account, "accountnumber", None),
             "iban": account.iban,
@@ -257,7 +258,7 @@ class FinTsBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator], SensorEn
     @property
     def _account_data(self) -> Any | None:
         if self.coordinator.data:
-            return self.coordinator.data.accounts.get(self._iban)
+            return self.coordinator.data.accounts.get(self._account_key)
         return None
 
     @property
@@ -306,13 +307,13 @@ class FinTsAvailableBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator],
         name: str,
     ) -> None:
         super().__init__(coordinator)
-        self._iban = account.iban
+        self._account_key = account_identifier(account, client.name)
         ident = account_identifier(account, client.name)
         self._attr_unique_id = f"{entry.entry_id}_{ident}_available_balance"
         self._attr_name = f"{name} Available Balance"
         self._attr_device_info = get_account_device_info(entry, account, client.name)
         self._base_attrs: dict[str, Any] = {
-            "account": account.iban,
+            "account": account.iban or getattr(account, "accountnumber", None),
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_AVAILABLE_BALANCE,
         }
         if client.name:
@@ -321,7 +322,7 @@ class FinTsAvailableBalanceSensor(CoordinatorEntity[FinTsDataUpdateCoordinator],
     @property
     def _account_data(self) -> Any | None:
         if self.coordinator.data:
-            return self.coordinator.data.accounts.get(self._iban)
+            return self.coordinator.data.accounts.get(self._account_key)
         return None
 
     def _pending_outgoing(self) -> tuple[float, int]:
@@ -386,13 +387,13 @@ class FinTsUpcomingTransactionsSensor(CoordinatorEntity[FinTsDataUpdateCoordinat
         name: str,
     ) -> None:
         super().__init__(coordinator)
-        self._iban = account.iban
+        self._account_key = account_identifier(account, client.name)
         ident = account_identifier(account, client.name)
         self._attr_unique_id = f"{entry.entry_id}_{ident}_upcoming_transactions"
         self._attr_name = f"{name} Upcoming Transactions"
         self._attr_device_info = get_account_device_info(entry, account, client.name)
         self._base_attrs: dict[str, Any] = {
-            "account": account.iban,
+            "account": account.iban or getattr(account, "accountnumber", None),
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_UPCOMING_TRANSACTIONS,
         }
         if client.name:
@@ -401,7 +402,7 @@ class FinTsUpcomingTransactionsSensor(CoordinatorEntity[FinTsDataUpdateCoordinat
     @property
     def _account_data(self) -> Any | None:
         if self.coordinator.data:
-            return self.coordinator.data.accounts.get(self._iban)
+            return self.coordinator.data.accounts.get(self._account_key)
         return None
 
     @property
@@ -530,7 +531,8 @@ class FinTsLegacyAccount(SensorEntity):
         self._attr_name = name
         self._attr_icon = ICON
         self._attr_extra_state_attributes = {
-            "account": self._account.iban,
+            "account": self._account.iban
+            or getattr(self._account, "accountnumber", None),
             ATTR_ACCOUNT_TYPE: ACCOUNT_TYPE_BALANCE,
         }
         if self._client.name:

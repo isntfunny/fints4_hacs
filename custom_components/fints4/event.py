@@ -17,7 +17,9 @@ from .client import FinTsClient
 from .const import DOMAIN
 from .coordinator import (
     FinTsDataUpdateCoordinator,
+    account_config_name,
     account_identifier,
+    account_is_configured,
     event_payload,
     get_account_device_info,
 )
@@ -43,13 +45,12 @@ async def async_setup_entry(
     entities: list[EventEntity] = []
 
     for account in balance_accounts:
-        iban = account.iban
-        if account_config and iban not in account_config:
+        ident = account_identifier(account, client.name)
+        if not account_is_configured(account, account_config, client.name):
             continue
 
-        account_name = account_config.get(iban)
-        if not account_name:
-            account_name = account.accountnumber or iban or "FinTS"
+        account_name = account_config_name(account, account_config, client.name)
+        account_name = account_name or ident or "FinTS"
 
         entities.append(
             FinTsNewTransactionEvent(coordinator, entry, client, account, account_name)
@@ -81,7 +82,7 @@ class _FinTsBaseTransactionEvent(
         name_suffix: str,
     ) -> None:
         super().__init__(coordinator)
-        self._iban = account.iban
+        self._account_key = account_identifier(account, client.name)
         ident = account_identifier(account, client.name)
         self._attr_unique_id = f"{entry.entry_id}_{ident}_{unique_suffix}"
         self._attr_name = f"{name} {name_suffix}"
@@ -95,7 +96,7 @@ class _FinTsBaseTransactionEvent(
 
         new_txs: list[dict[str, Any]] = getattr(
             self.coordinator.data, self._data_key, {}
-        ).get(self._iban, [])
+        ).get(self._account_key, [])
 
         if not new_txs:
             return  # nothing new — skip the state write

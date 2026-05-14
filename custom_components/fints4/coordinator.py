@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .client import FinTsClient
 from .const import DEFAULT_UPDATE_INTERVAL, DOMAIN, TRANSACTION_LOOKBACK_DAYS
+from .credit_card import serialize_credit_card_response
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def _tx_hash(tx: dict[str, Any]) -> str:
         str(tx.get("currency", "")),
         tx.get("bank_reference", "") or tx.get("end_to_end_reference", "") or "",
         tx.get("customer_reference", "") or "",
+        tx.get("purpose", "") or "",
     ]
     return hashlib.md5("|".join(parts).encode()).hexdigest()  # noqa: S324
 
@@ -72,12 +74,49 @@ def event_payload(tx: dict[str, Any]) -> dict[str, Any]:
         "recipient_name": tx.get("recipient_name"),
         "purpose": tx.get("purpose"),
         "end_to_end_reference": tx.get("end_to_end_reference"),
+        "bank_reference": tx.get("bank_reference"),
     }
 
 
 def account_identifier(account: SEPAAccount, client_name: str) -> str:
     """Return the best available unique string for an account."""
-    return account.iban or getattr(account, "accountnumber", None) or client_name
+    return account_keys(account, client_name)[0]
+
+
+def account_keys(account: SEPAAccount, client_name: str) -> tuple[str, ...]:
+    """Return stable lookup keys for account config and coordinator data."""
+    keys = (
+        getattr(account, "accountnumber", None),
+        getattr(account, "iban", None),
+        client_name,
+    )
+    return tuple(dict.fromkeys(str(key) for key in keys if key))
+
+
+def account_display_name(account: SEPAAccount, client_name: str) -> str:
+    """Return a user-facing account label."""
+    return account_identifier(account, client_name)
+
+
+def account_config_name(
+    account: SEPAAccount,
+    config: dict[str, str | None],
+    client_name: str,
+) -> str | None:
+    """Return configured account name for any supported account key."""
+    for key in account_keys(account, client_name):
+        if key in config:
+            return config[key]
+    return None
+
+
+def account_is_configured(
+    account: SEPAAccount,
+    config: dict[str, str | None],
+    client_name: str,
+) -> bool:
+    """Return whether the account passes an optional account filter."""
+    return not config or any(key in config for key in account_keys(account, client_name))
 
 
 def get_account_device_info(
@@ -86,14 +125,12 @@ def get_account_device_info(
     client_name: str,
 ) -> DeviceInfo:
     """Create device info — one device per account (IBAN or account number)."""
-    iban = getattr(account, "iban", None)
-    account_number = getattr(account, "accountnumber", None)
-    identifier = iban or account_number or client_name
+    identifier = account_identifier(account, client_name)
     return DeviceInfo(
         identifiers={(DOMAIN, f"{entry.entry_id}_{identifier}")},
-        name=iban or account_number or "Unknown Account",
+        name=identifier,
         manufacturer="FinTS",
-        model="Bank Account" if iban else "Depot",
+        model="Account",
     )
 
 
@@ -166,47 +203,68 @@ class FinTsDataUpdateCoordinator(DataUpdateCoordinator[FinTsCoordinatorData]):
             with bank:
                 # --- Balance accounts: balance + transactions ---
                 for account in self.balance_accounts:
-                    iban = account.iban
-                    if not iban:
+                    account_key = account_identifier(account, self.client.name)
+                    account_number = getattr(account, "accountnumber", None)
+                    if not account_key:
                         continue
 
                     account_data = FinTsAccountData()
+                    is_credit_card = self.client.is_credit_card_account(account)
 
                     try:
-                        account_data.balance = bank.get_balance(account)
+                        if not is_credit_card:
+                            account_data.balance = bank.get_balance(account)
                     except Exception as exc:  # noqa: BLE001
-                        _LOGGER.warning("Failed to get balance for %s: %s", iban, exc)
+                        _LOGGER.warning(
+                            "Failed to get balance for %s: %s", account_key, exc
+                        )
 
                     try:
-                        booked, pending = self._fetch_and_split_transactions(
-                            bank, account, start_date, today
-                        )
+                        if is_credit_card:
+                            if not account_number:
+                                raise ValueError("Credit card account number is missing")
+                            segments = bank.get_credit_card_transactions(
+                                account, account_number, start_date, today
+                            )
+                            balance, booked = serialize_credit_card_response(
+                                segments, account_key
+                            )
+                            if balance is not None:
+                                account_data.balance = balance
+                            pending = []
+                        else:
+                            booked, pending = self._fetch_and_split_transactions(
+                                bank, account, start_date, today
+                            )
                         account_data.booked_transactions = booked
                         account_data.pending_transactions = pending
                         _LOGGER.debug(
                             "Transactions for %s: %d booked, %d pending",
-                            iban, len(booked), len(pending),
+                            account_key, len(booked), len(pending),
                         )
                         if pending:
                             for tx in pending:
                                 _LOGGER.debug(
                                     "  Pending: %s %s %s — %s",
                                     tx.get("date"), tx.get("amount"),
-                                    tx.get("currency"), tx.get("applicant_name") or tx.get("purpose"),
+                                    tx.get("currency"),
+                                    tx.get("applicant_name") or tx.get("purpose"),
                                 )
                     except Exception as exc:  # noqa: BLE001
                         _LOGGER.warning(
-                            "Failed to get transactions for %s: %s", iban, exc
+                            "Failed to get transactions for %s: %s", account_key, exc
                         )
 
-                    result.accounts[iban] = account_data
+                    result.accounts[account_key] = account_data
 
                     # Deduplication
                     new_booked, new_pending = self._deduplicate(
-                        iban, account_data.booked_transactions, account_data.pending_transactions
+                        account_key,
+                        account_data.booked_transactions,
+                        account_data.pending_transactions,
                     )
-                    result.new_booked[iban] = new_booked
-                    result.new_pending[iban] = new_pending
+                    result.new_booked[account_key] = new_booked
+                    result.new_pending[account_key] = new_pending
 
                 # --- Holdings accounts ---
                 for account in self.holdings_accounts:
@@ -214,7 +272,22 @@ class FinTsDataUpdateCoordinator(DataUpdateCoordinator[FinTsCoordinatorData]):
                     if not acc_nr:
                         continue
                     try:
-                        result.holdings[acc_nr] = bank.get_holdings(account)
+                        holdings = bank.get_holdings(account)
+                        result.holdings[acc_nr] = holdings
+                        _LOGGER.debug(
+                            "Holdings for %s: %d holdings retrieved",
+                            acc_nr, len(holdings) if holdings else 0
+                        )
+                        if holdings:
+                            for holding in holdings:
+                                _LOGGER.debug(
+                                    "  Holding: %s (ISIN: %s) - %s %s, %s pieces",
+                                    holding.name,
+                                    holding.ISIN,
+                                    holding.total_value,
+                                    holding.value_symbol,
+                                    holding.pieces
+                                )
                     except Exception as exc:  # noqa: BLE001
                         _LOGGER.warning(
                             "Failed to get holdings for %s: %s", acc_nr, exc
